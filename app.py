@@ -1,9 +1,18 @@
 """
 首頁:登入 / 註冊
 登入後會在 session_state 存使用者資訊,然後可以從左側選單進入其他頁面。
+有 cookie 持續登入機制,30 天內免再次輸入密碼。
 """
 import streamlit as st
-from utils import get_supabase, get_current_user, logout, render_sidebar
+from utils import (
+    get_supabase,
+    get_current_user,
+    logout,
+    render_sidebar,
+    try_auto_login,
+    save_session_cookie,
+    get_cookie_manager,
+)
 
 
 st.set_page_config(
@@ -12,6 +21,14 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="expanded",
 )
+
+# Cookie manager 必須在這裡初始化(讓 component 開始載入)
+get_cookie_manager()
+
+# 嘗試從 cookie 自動登入
+if not get_current_user():
+    if try_auto_login():
+        st.rerun()
 
 st.title("💰 記帳日誌")
 
@@ -29,6 +46,7 @@ if get_current_user():
         - **📔 我的日誌** — 寫下今天發生的事
         - **🌐 公開總覽** — 看所有人的記錄
         - **📊 圖表分析** — 收支視覺化圖表
+        - **📋 資產模板** — 每月個人總資產追蹤
         """
     )
 
@@ -74,6 +92,8 @@ else:
                             "access_token": response.session.access_token,
                             "refresh_token": response.session.refresh_token,
                         }
+                        # 存到 cookie,下次免登入
+                        save_session_cookie(response.session.refresh_token)
                         st.success("登入成功!")
                         st.rerun()
                     except Exception as e:
