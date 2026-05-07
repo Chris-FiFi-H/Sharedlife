@@ -1,9 +1,90 @@
 """
-共用工具:Supabase 連線、登入狀態管理、權限檢查
+共用工具:Supabase 連線、登入狀態管理、權限檢查、Cookie 持續登入
 所有 page 都會 import 這裡的東西
 """
+from datetime import datetime, timedelta
 import streamlit as st
 from supabase import create_client, Client
+import extra_streamlit_components as stx
+
+
+COOKIE_NAME = "sl_refresh"  # sl = sharedlife
+COOKIE_DAYS = 30
+
+
+@st.cache_resource
+def get_cookie_manager():
+    """整個 App 共用一個 CookieManager。"""
+    return stx.CookieManager(key="sl_cookie_mgr")
+
+
+def save_session_cookie(refresh_token: str):
+    """把 refresh token 存到瀏覽器 cookie,30 天內免登入。"""
+    if not refresh_token:
+        return
+    try:
+        get_cookie_manager().set(
+            COOKIE_NAME,
+            refresh_token,
+            expires_at=datetime.now() + timedelta(days=COOKIE_DAYS),
+            key=f"set_cookie_{datetime.now().timestamp()}",
+        )
+    except Exception:
+        pass
+
+
+def clear_session_cookie():
+    """清除登入 cookie。"""
+    try:
+        get_cookie_manager().delete(
+            COOKIE_NAME,
+            key=f"del_cookie_{datetime.now().timestamp()}",
+        )
+    except Exception:
+        pass
+
+
+def try_auto_login() -> bool:
+    """
+    用 cookie 中的 refresh_token 嘗試自動登入。
+    回傳 True 表示成功還原 session,呼叫端應 st.rerun()。
+    """
+    if get_current_user():
+        return False  # 已登入,不用做事
+
+    cookies = get_cookie_manager().get_all()
+    if not cookies:
+        return False  # 第一次 render 還沒拿到 cookie 內容
+
+    refresh_token = cookies.get(COOKIE_NAME)
+    if not refresh_token:
+        return False  # 沒有保存的 session
+
+    try:
+        client = get_supabase()
+        response = client.auth.refresh_session(refresh_token)
+        if response and response.user and response.session:
+            display_name = (
+                (response.user.user_metadata or {}).get("display_name")
+                or (response.user.email or "").split("@")[0]
+            )
+            st.session_state.user = {
+                "id": response.user.id,
+                "email": response.user.email,
+                "display_name": display_name,
+            }
+            st.session_state.auth_session = {
+                "access_token": response.session.access_token,
+                "refresh_token": response.session.refresh_token,
+            }
+            # 更新 cookie(refresh_token 可能被輪替了)
+            save_session_cookie(response.session.refresh_token)
+            return True
+    except Exception:
+        # token 過期或無效,清掉 cookie
+        clear_session_cookie()
+
+    return False
 
 
 def get_supabase() -> Client:
@@ -53,11 +134,12 @@ def require_login():
 
 
 def logout():
-    """登出並清掉 session_state 裡所有相關欄位。"""
+    """登出並清掉 session_state + cookie。"""
     try:
         get_supabase().auth.sign_out()
     except Exception:
         pass
+    clear_session_cookie()
     for key in ("user", "auth_session", "_user_names_cache"):
         st.session_state.pop(key, None)
 
