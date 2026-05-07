@@ -107,9 +107,9 @@ def to_twd(amount, currency, rate):
     return float(amount)
 
 
-# ====== 四個 Tab ======
-tab_monthly, tab_chart, tab_combined, tab_manage = st.tabs(
-    ["📅 本月資產", "📈 資產走勢", "🤝 共同資產", "⚙️ 管理類別"]
+# ====== 五個 Tab ======
+tab_monthly, tab_chart, tab_combined, tab_io, tab_manage = st.tabs(
+    ["📅 本月資產", "📈 資產走勢", "🤝 共同資產", "📤 匯入匯出", "⚙️ 管理類別"]
 )
 
 
@@ -170,6 +170,15 @@ with tab_monthly:
 
     # ---------- 載入既有資料 ----------
     existing = get_monthly_data(me["id"], year, month)
+
+    # ---------- 狀態提示 ----------
+    if existing:
+        st.success(
+            f"📝 **編輯模式** — 本月已儲存 **{len(existing)}** 筆記錄,"
+            f"修改後請按下方「💾 儲存本月資料」更新"
+        )
+    else:
+        st.info("✨ **新增模式** — 本月還沒有資料,填完按下方「💾 儲存本月資料」")
 
     # ---------- 依 section 渲染 ----------
     grand_total = 0.0
@@ -326,17 +335,52 @@ with tab_monthly:
             )
     cols[3].metric("總計", f"NT$ {grand_total:,.0f}")
 
-    if st.button("💾 儲存本月資料", type="primary", use_container_width=True):
-        try:
-            # 先刪除這個月的舊資料,再批次插入(這樣比 upsert 簡單可靠)
-            client = get_supabase()
-            client.table("monthly_assets").delete().eq("user_id", me["id"]).eq(
-                "year", year
-            ).eq("month", month).execute()
-            client.table("monthly_assets").insert(pending_rows).execute()
-            st.success(f"已儲存 {year} 年 {month:02d} 月資料 ✅")
-        except Exception as e:
-            st.error(f"儲存失敗:{e}")
+    save_col, del_col = st.columns([3, 1])
+    with save_col:
+        if st.button("💾 儲存本月資料", type="primary", use_container_width=True):
+            try:
+                # 先刪除這個月的舊資料,再批次插入(這樣比 upsert 簡單可靠)
+                client = get_supabase()
+                client.table("monthly_assets").delete().eq("user_id", me["id"]).eq(
+                    "year", year
+                ).eq("month", month).execute()
+                client.table("monthly_assets").insert(pending_rows).execute()
+                st.success(f"已儲存 {year} 年 {month:02d} 月資料 ✅")
+            except Exception as e:
+                st.error(f"儲存失敗:{e}")
+
+    with del_col:
+        # 用 session_state 做二次確認(防止誤按)
+        confirm_key = f"confirm_del_{year}_{month}"
+        if not st.session_state.get(confirm_key):
+            if existing and st.button(
+                "🗑️ 清空本月",
+                use_container_width=True,
+                help=f"刪除 {year}/{month:02d} 的所有資料",
+            ):
+                st.session_state[confirm_key] = True
+                st.rerun()
+        else:
+            st.warning("⚠️ 確定要刪除嗎?")
+            yes, no = st.columns(2)
+            if yes.button("確定", type="primary", key=f"yes_{year}_{month}"):
+                try:
+                    get_supabase().table("monthly_assets").delete().eq(
+                        "user_id", me["id"]
+                    ).eq("year", year).eq("month", month).execute()
+                    # 清掉這個月對應的 session_state widget keys
+                    for cat in categories:
+                        base = f"a_{cat['id']}_{year}_{month}"
+                        for suffix in ("_curr", "_rate", "_value", "_cost"):
+                            st.session_state.pop(f"{base}{suffix}", None)
+                    st.session_state.pop(confirm_key, None)
+                    st.success(f"已刪除 {year}/{month:02d} 全部資料")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"刪除失敗:{e}")
+            if no.button("取消", key=f"no_{year}_{month}"):
+                st.session_state.pop(confirm_key, None)
+                st.rerun()
 
 
 # =====================================================================
@@ -748,7 +792,345 @@ with tab_combined:
 
 
 # =====================================================================
-#  Tab 4:管理類別
+#  Tab 4:匯入匯出
+# =====================================================================
+with tab_io:
+    st.caption(
+        "把你的資產資料下載成 CSV 留底,或從 CSV 一次匯入大量資料"
+        "(例如把過去半年的記錄一次補進來)"
+    )
+
+    # ====== 匯出 ======
+    st.markdown("### 📥 匯出 CSV")
+    exp_col1, exp_col2, exp_col3 = st.columns([1, 1, 2])
+    with exp_col1:
+        exp_start_year = st.number_input(
+            "起始年", min_value=2000, max_value=2100, value=date.today().year - 1, step=1
+        )
+        exp_start_month = st.selectbox(
+            "起始月", list(range(1, 13)), index=0, format_func=lambda m: f"{m:02d}",
+            key="exp_start_month",
+        )
+    with exp_col2:
+        exp_end_year = st.number_input(
+            "結束年", min_value=2000, max_value=2100, value=date.today().year, step=1
+        )
+        exp_end_month = st.selectbox(
+            "結束月", list(range(1, 13)), index=11, format_func=lambda m: f"{m:02d}",
+            key="exp_end_month",
+        )
+    with exp_col3:
+        exp_only_me = st.checkbox("只匯出自己的資料", value=True)
+        st.caption("(取消勾選則含其他人公開的資料)")
+
+    # 用 (year * 100 + month) 把區間轉成數字方便比對
+    exp_start_val = exp_start_year * 100 + exp_start_month
+    exp_end_val = exp_end_year * 100 + exp_end_month
+
+    if exp_start_val > exp_end_val:
+        st.error("起始年月不能晚於結束年月")
+    else:
+        # 抓資料
+        try:
+            q = (
+                get_supabase()
+                .table("monthly_assets")
+                .select("*, asset_categories(name, section, has_cost_value)")
+                .order("year")
+                .order("month")
+            )
+            if exp_only_me:
+                q = q.eq("user_id", me["id"])
+            all_rows = q.execute().data or []
+        except Exception as e:
+            st.error(f"讀取失敗:{e}")
+            all_rows = []
+
+        # 按月份範圍篩
+        in_range = [
+            r for r in all_rows
+            if exp_start_val <= r["year"] * 100 + r["month"] <= exp_end_val
+        ]
+
+        if in_range:
+            name_map_exp = user_id_to_name_map() if not exp_only_me else {}
+            # 建構 dataframe
+            rows = []
+            for r in in_range:
+                ac = r.get("asset_categories") or {}
+                row = {
+                    "year": r["year"],
+                    "month": r["month"],
+                    "section": ac.get("section", ""),
+                    "category_name": ac.get("name", ""),
+                    "currency": r.get("currency", "TWD"),
+                    "exchange_rate": r.get("exchange_rate", 1),
+                    "current_value": r.get("current_value", 0),
+                    "cost": r.get("cost") if r.get("cost") is not None else "",
+                    "notes": r.get("notes") or "",
+                }
+                if not exp_only_me:
+                    row["owner"] = name_map_exp.get(r["user_id"], r["user_id"][:8])
+                rows.append(row)
+
+            export_df = pd.DataFrame(rows)
+            # 排好欄位順序
+            cols_order = ["year", "month", "section", "category_name", "currency",
+                          "exchange_rate", "current_value", "cost", "notes"]
+            if not exp_only_me:
+                cols_order = ["owner"] + cols_order
+            export_df = export_df[cols_order]
+
+            csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")  # utf-8-sig 讓 Excel 開不亂碼
+
+            filename = f"sharedlife_assets_{exp_start_year}{exp_start_month:02d}_{exp_end_year}{exp_end_month:02d}.csv"
+
+            st.download_button(
+                label=f"⬇️ 下載 {len(in_range)} 筆資料(CSV)",
+                data=csv_bytes,
+                file_name=filename,
+                mime="text/csv",
+                type="primary",
+            )
+
+            with st.expander(f"📋 預覽前 10 筆"):
+                st.dataframe(export_df.head(10), use_container_width=True, hide_index=True)
+        else:
+            st.info("這個範圍沒有資料")
+
+    st.divider()
+
+    # ====== 格式說明 ======
+    st.markdown("### 📑 CSV 格式說明")
+
+    st.markdown(
+        """
+**欄位定義**(順序可隨意,只要欄位名稱對得上)
+
+| 欄位 | 必填 | 說明 |
+|------|------|------|
+| `year` | ✅ | 西元年(整數,例如 `2026`) |
+| `month` | ✅ | 月份 1-12(整數) |
+| `section` | ✅ | 必須是 `bank` / `investment` / `other` 三選一 |
+| `category_name` | ✅ | 類別名稱,要對得上你「管理類別」裡已建立的類別,否則該筆會被跳過 |
+| `currency` | ✅ | `TWD` 或 `USD` |
+| `exchange_rate` | ✅ | 匯率,TWD 填 `1`,USD 填當月匯率(例如 `31.5`) |
+| `current_value` | ✅ | 該幣別的金額(不是 TWD,程式會自己 × 匯率算 TWD) |
+| `cost` | ⭕️ | 成本(只有投資帳戶要填,銀行帳戶留空) |
+| `notes` | ⭕️ | 備註,可留空 |
+
+**範例:**
+```csv
+year,month,section,category_name,currency,exchange_rate,current_value,cost,notes
+2026,5,bank,國泰,TWD,1,52000,,
+2026,5,bank,外幣帳戶,USD,31.5,1000,,主要薪轉戶
+2026,5,investment,複委託,USD,31.5,5500,4000,Apple/Tesla
+```
+        """
+    )
+
+    # 範本 CSV 下載
+    sample_rows = [
+        {"year": 2026, "month": 5, "section": "bank", "category_name": "國泰",
+         "currency": "TWD", "exchange_rate": 1, "current_value": 52000, "cost": "", "notes": ""},
+        {"year": 2026, "month": 5, "section": "bank", "category_name": "外幣帳戶",
+         "currency": "USD", "exchange_rate": 31.5, "current_value": 1000, "cost": "", "notes": "薪轉戶"},
+        {"year": 2026, "month": 5, "section": "investment", "category_name": "複委託",
+         "currency": "USD", "exchange_rate": 31.5, "current_value": 5500, "cost": 4000, "notes": ""},
+    ]
+    sample_csv = pd.DataFrame(sample_rows).to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "⬇️ 下載範本 CSV",
+        data=sample_csv,
+        file_name="sharedlife_assets_template.csv",
+        mime="text/csv",
+    )
+
+    st.divider()
+
+    # ====== 匯入 ======
+    st.markdown("### 📤 匯入 CSV")
+    st.caption(
+        "上傳的 CSV **只會影響自己的資料**,不會動到別人的。"
+        "類別名稱必須跟「管理類別」裡的對得起來,對不起來的 row 會被略過。"
+    )
+
+    uploaded = st.file_uploader(
+        "選擇 CSV 檔(UTF-8 編碼)", type=["csv"], key="csv_upload"
+    )
+
+    if uploaded:
+        try:
+            # 嘗試用幾種編碼讀
+            try:
+                imp_df = pd.read_csv(uploaded, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                uploaded.seek(0)
+                imp_df = pd.read_csv(uploaded, encoding="big5")
+
+            # 檢查欄位
+            required = ["year", "month", "section", "category_name", "currency",
+                        "exchange_rate", "current_value"]
+            missing = [c for c in required if c not in imp_df.columns]
+            if missing:
+                st.error(f"CSV 缺欄位:{missing}")
+            else:
+                # 補上 optional 欄位
+                if "cost" not in imp_df.columns:
+                    imp_df["cost"] = None
+                if "notes" not in imp_df.columns:
+                    imp_df["notes"] = None
+
+                # 把目前自己的所有類別查出來(用來對 category_name)
+                my_cats = (
+                    get_supabase()
+                    .table("asset_categories")
+                    .select("id, name, section")
+                    .eq("user_id", me["id"])
+                    .execute()
+                    .data
+                ) or []
+                # (section, name) → cat_id 對照表
+                cat_lookup = {
+                    (c["section"], c["name"]): c["id"] for c in my_cats
+                }
+
+                # 逐筆驗證
+                ok_rows = []
+                skip_rows = []
+                for idx, row in imp_df.iterrows():
+                    section = str(row["section"]).strip()
+                    name = str(row["category_name"]).strip()
+
+                    # 必填驗證
+                    if section not in ("bank", "investment", "other"):
+                        skip_rows.append((idx + 2, name, f"section 不是 bank/investment/other:'{section}'"))
+                        continue
+                    if (section, name) not in cat_lookup:
+                        skip_rows.append((idx + 2, name, f"類別不存在於『{SECTION_NAMES[section]}』(請先在管理類別新增)"))
+                        continue
+
+                    currency = str(row["currency"]).strip().upper()
+                    if currency not in ("TWD", "USD"):
+                        skip_rows.append((idx + 2, name, f"currency 不是 TWD/USD:'{currency}'"))
+                        continue
+
+                    try:
+                        year = int(row["year"])
+                        month = int(row["month"])
+                        if not (1 <= month <= 12):
+                            raise ValueError("month 不在 1-12")
+                    except (ValueError, TypeError) as e:
+                        skip_rows.append((idx + 2, name, f"year/month 格式錯:{e}"))
+                        continue
+
+                    cost_val = row.get("cost")
+                    if pd.isna(cost_val) or cost_val == "":
+                        cost_val = None
+                    else:
+                        try:
+                            cost_val = float(cost_val)
+                        except ValueError:
+                            cost_val = None
+
+                    ok_rows.append({
+                        "user_id": me["id"],
+                        "category_id": cat_lookup[(section, name)],
+                        "year": year,
+                        "month": month,
+                        "currency": currency,
+                        "exchange_rate": float(row["exchange_rate"]) if pd.notna(row["exchange_rate"]) else 1.0,
+                        "current_value": float(row["current_value"]),
+                        "cost": cost_val,
+                        "notes": (str(row["notes"]) if pd.notna(row.get("notes")) and str(row["notes"]) != "" else None),
+                    })
+
+                # 顯示驗證結果
+                c1, c2 = st.columns(2)
+                c1.metric("✅ 可匯入", len(ok_rows))
+                c2.metric("⏭️ 略過", len(skip_rows))
+
+                if skip_rows:
+                    with st.expander(f"⚠️ {len(skip_rows)} 筆被略過(展開看原因)"):
+                        sk_df = pd.DataFrame(skip_rows, columns=["CSV 行號", "類別", "原因"])
+                        st.dataframe(sk_df, use_container_width=True, hide_index=True)
+
+                if ok_rows:
+                    with st.expander(f"📋 預覽要匯入的 {len(ok_rows)} 筆"):
+                        preview_df = pd.DataFrame(ok_rows)
+                        st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+                    # 衝突處理選項
+                    mode = st.radio(
+                        "如果某 (年, 月, 類別) 已經有資料,要怎麼處理?",
+                        options=["upsert", "skip", "replace_month"],
+                        format_func=lambda m: {
+                            "upsert": "🔄 覆蓋(用 CSV 的數字蓋掉舊的)",
+                            "skip": "⏭️ 跳過(保留資料庫舊的)",
+                            "replace_month": "🗑️ 整月清空再寫入(會刪掉 CSV 沒包到的類別)",
+                        }[m],
+                        index=0,
+                    )
+
+                    if st.button(
+                        f"🚀 確定匯入 {len(ok_rows)} 筆",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        try:
+                            client = get_supabase()
+                            inserted = 0
+                            updated = 0
+                            skipped_existing = 0
+
+                            if mode == "replace_month":
+                                # 把要寫入的 (year, month) 找出來,先 delete
+                                ym_set = {(r["year"], r["month"]) for r in ok_rows}
+                                for y, m in ym_set:
+                                    client.table("monthly_assets").delete().eq(
+                                        "user_id", me["id"]
+                                    ).eq("year", y).eq("month", m).execute()
+                                # 再批次 insert
+                                client.table("monthly_assets").insert(ok_rows).execute()
+                                inserted = len(ok_rows)
+                            else:
+                                # upsert / skip 模式:逐筆檢查
+                                for r in ok_rows:
+                                    exist_q = (
+                                        client.table("monthly_assets")
+                                        .select("id")
+                                        .eq("user_id", me["id"])
+                                        .eq("category_id", r["category_id"])
+                                        .eq("year", r["year"])
+                                        .eq("month", r["month"])
+                                        .execute()
+                                    )
+                                    if exist_q.data:
+                                        if mode == "skip":
+                                            skipped_existing += 1
+                                            continue
+                                        # upsert: 改既有
+                                        client.table("monthly_assets").update(
+                                            {k: v for k, v in r.items() if k != "user_id"}
+                                        ).eq("id", exist_q.data[0]["id"]).execute()
+                                        updated += 1
+                                    else:
+                                        client.table("monthly_assets").insert(r).execute()
+                                        inserted += 1
+
+                            msg = f"✅ 完成! 新增 {inserted} 筆,更新 {updated} 筆"
+                            if skipped_existing:
+                                msg += f",跳過 {skipped_existing} 筆已存在"
+                            st.success(msg)
+                        except Exception as e:
+                            st.error(f"匯入失敗:{e}")
+
+        except Exception as e:
+            st.error(f"讀檔失敗:{e}")
+
+
+# =====================================================================
+#  Tab 5:管理類別
 # =====================================================================
 with tab_manage:
     st.subheader("我的類別清單")

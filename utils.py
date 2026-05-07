@@ -12,10 +12,15 @@ COOKIE_NAME = "sl_refresh"  # sl = sharedlife
 COOKIE_DAYS = 30
 
 
-@st.cache_resource
 def get_cookie_manager():
-    """整個 App 共用一個 CookieManager。"""
-    return stx.CookieManager(key="sl_cookie_mgr")
+    """
+    取得 CookieManager。每個 browser session 建一個,存在 session_state。
+    不能用 @st.cache_resource,因為 CookieManager 內部會 render 一個 component widget,
+    Streamlit 不允許 widget 出現在 cached function 裡。
+    """
+    if "_cookie_manager_instance" not in st.session_state:
+        st.session_state._cookie_manager_instance = stx.CookieManager(key="sl_cookie_mgr")
+    return st.session_state._cookie_manager_instance
 
 
 def save_session_cookie(refresh_token: str):
