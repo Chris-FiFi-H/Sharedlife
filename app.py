@@ -13,6 +13,7 @@ from utils import (
     save_session_cookie,
     save_session_to_url,
     get_cookie_manager,
+    ensure_url_has_token,
 )
 
 
@@ -42,6 +43,9 @@ st.title("💰 記帳日誌")
 
 # ---------- 已登入狀態 ----------
 if get_current_user():
+    # 確保 URL 上有 token(換頁回首頁時可能被清掉)
+    ensure_url_has_token()
+
     user = get_current_user()
     name = user.get("display_name") or user.get("email", "")
     st.success(f"歡迎回來,{name} 👋")
