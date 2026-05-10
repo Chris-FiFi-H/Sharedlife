@@ -65,11 +65,16 @@ DEFAULT_TEMPLATE = [
     {"section": "other", "name": "不動產",       "default_currency": "TWD", "has_cost_value": False, "display_order": 4},
     {"section": "other", "name": "車輛",         "default_currency": "TWD", "has_cost_value": False, "display_order": 5},
     {"section": "other", "name": "應收款",       "default_currency": "TWD", "has_cost_value": False, "display_order": 6},
+    # 信用卡消費(每月卡費)
+    {"section": "credit_card", "name": "國泰世華卡", "default_currency": "TWD", "has_cost_value": False, "display_order": 1},
+    {"section": "credit_card", "name": "中信卡",     "default_currency": "TWD", "has_cost_value": False, "display_order": 2},
+    {"section": "credit_card", "name": "玉山卡",     "default_currency": "TWD", "has_cost_value": False, "display_order": 3},
+    {"section": "credit_card", "name": "台新卡",     "default_currency": "TWD", "has_cost_value": False, "display_order": 4},
 ]
 
-SECTION_ICONS = {"bank": "🏦", "investment": "📈", "other": "📦"}
-SECTION_NAMES = {"bank": "帳戶資產", "investment": "投資帳戶", "other": "其他項目"}
-SECTION_ORDER = ["bank", "investment", "other"]
+SECTION_ICONS = {"bank": "🏦", "investment": "📈", "other": "📦", "credit_card": "💳"}
+SECTION_NAMES = {"bank": "帳戶資產", "investment": "投資帳戶", "other": "其他項目", "credit_card": "信用卡消費"}
+SECTION_ORDER = ["bank", "investment", "other", "credit_card"]
 
 
 # ====== 取資料的工具函式 ======
@@ -725,6 +730,7 @@ def _render_tab_chart():
                 "帳戶資產": "#3b82f6",
                 "投資帳戶": "#10b981",
                 "其他項目": "#f59e0b",
+                "信用卡消費": "#ec4899",
             },
         )
         fig2.update_layout(height=350, hovermode="x unified", legend_title_text="")
@@ -1152,6 +1158,7 @@ def _render_tab_combined():
                     "帳戶資產": "#3b82f6",
                     "投資帳戶": "#10b981",
                     "其他項目": "#f59e0b",
+                    "信用卡消費": "#ec4899",
                 },
             )
             fig_sec.update_traces(textposition="inside", textinfo="percent+label")
