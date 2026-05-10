@@ -620,11 +620,16 @@ with tab_combined:
         st.stop()
 
     # ---------- 4. 多選要納入的類別(預設全選) ----------
+    VIS_ICON_MAP = {"private": "🔒", "public": "🌐", "shared": "👥"}
     cat_label_map = {}
     for cat in visible_cats:
         owner = name_map_c.get(cat["user_id"], cat["user_id"][:8])
-        privacy = "🔒" if not cat.get("is_public", True) else ""
-        label = f"{owner}・{SECTION_ICONS[cat['section']]} {cat['name']} {privacy}".strip()
+        vis = cat.get("visibility") or ("public" if cat.get("is_public") else "private")
+        vis_icon = VIS_ICON_MAP.get(vis, "")
+        # 自己的類別不重複標 icon(避免雜訊)
+        if cat["user_id"] == me["id"]:
+            vis_icon = ""
+        label = f"{owner}・{SECTION_ICONS[cat['section']]} {cat['name']} {vis_icon}".strip()
         cat_label_map[cat["id"]] = label
 
     selected_cat_ids = st.multiselect(
@@ -1173,9 +1178,45 @@ year,month,section,category_name,currency,exchange_rate,current_value,cost,notes
 with tab_manage:
     st.subheader("我的類別清單")
     st.caption(
-        "🔒 私人 = 只有自己看得到 / 🌐 公開 = 朋友也能在『共同資產』和『資產走勢』看到"
+        "🔒 私人 = 只有自己看得到 / 🌐 公開 = 所有登入者都看得到 / 👥 指定 = 只給特定使用者"
     )
     categories = get_my_categories()
+
+    # ---------- 抓所有類別的分享名單(批次,避免 N+1) ----------
+    shares_by_cat = {}  # cat_id -> [user_id, ...]
+    if categories:
+        try:
+            cat_ids = [c["id"] for c in categories]
+            shares_data = (
+                get_supabase()
+                .table("asset_category_shares")
+                .select("category_id, shared_with_user_id")
+                .in_("category_id", cat_ids)
+                .execute()
+                .data
+            ) or []
+            for s in shares_data:
+                shares_by_cat.setdefault(s["category_id"], []).append(
+                    s["shared_with_user_id"]
+                )
+        except Exception:
+            pass
+
+    # 取所有 user 用於分享名單(排除自己)
+    name_map_mgr = user_id_to_name_map()
+    shareable_users = [
+        u for u in get_all_users() if u["id"] != me["id"]
+    ]
+    shareable_user_ids = [u["id"] for u in shareable_users]
+
+    # Visibility 選項
+    VISIBILITY_OPTIONS = [
+        ("private", "🔒 私人"),
+        ("public", "🌐 公開"),
+        ("shared", "👥 指定"),
+    ]
+    VIS_VALUES = [v[0] for v in VISIBILITY_OPTIONS]
+    VIS_LABELS = dict(VISIBILITY_OPTIONS)
 
     if not categories:
         st.info("還沒有任何類別")
@@ -1194,26 +1235,54 @@ with tab_manage:
                     if not new_val:
                         st.toast("名稱不能空白", icon="⚠️")
                         return
+                # visibility 變更時也同步舊欄位 is_public,確保相容
+                update_payload = {field: new_val}
+                if field == "visibility":
+                    update_payload["is_public"] = (new_val == "public")
                 get_supabase().table("asset_categories").update(
-                    {field: new_val}
+                    update_payload
                 ).eq("id", cat_id).execute()
                 st.toast("已更新", icon="✅")
             except Exception as e:
                 st.error(f"更新失敗:{e}")
 
+        # ---------- 分享名單 update helper ----------
+        def _update_shares(cat_id, key):
+            new_user_ids = st.session_state[key] or []
+            try:
+                client = get_supabase()
+                # 先把這個 category 既有的分享全清掉
+                client.table("asset_category_shares").delete().eq(
+                    "category_id", cat_id
+                ).execute()
+                # 寫入新名單
+                if new_user_ids:
+                    rows = [
+                        {"category_id": cat_id, "shared_with_user_id": uid}
+                        for uid in new_user_ids
+                    ]
+                    client.table("asset_category_shares").insert(rows).execute()
+                st.toast(
+                    f"已更新分享名單({len(new_user_ids)} 人)" if new_user_ids
+                    else "已清空分享名單",
+                    icon="✅",
+                )
+            except Exception as e:
+                st.error(f"更新分享名單失敗:{e}")
+
         # 表頭
-        h = st.columns([1.2, 2, 0.9, 0.9, 0.7, 0.9, 0.5])
+        h = st.columns([1.2, 2, 0.9, 0.9, 0.7, 1.1, 0.5])
         h[0].markdown("**分區**")
         h[1].markdown("**名稱**")
         h[2].markdown("**幣別**")
         h[3].markdown("**有成本**")
         h[4].markdown("**順序**")
-        h[5].markdown("**公開**")
+        h[5].markdown("**可見性**")
         h[6].markdown("")
 
         for cat in categories:
             cid = cat["id"]
-            cols = st.columns([1.2, 2, 0.9, 0.9, 0.7, 0.9, 0.5])
+            cols = st.columns([1.2, 2, 0.9, 0.9, 0.7, 1.1, 0.5])
 
             # ----- 分區(可改) -----
             sec_key = f"sec_{cid}"
@@ -1276,14 +1345,21 @@ with tab_manage:
                 label_visibility="collapsed",
             )
 
-            # ----- 公開 toggle(可改) -----
-            pub_key = f"pub_{cid}"
-            cols[5].toggle(
-                "公開",
-                value=cat.get("is_public", True),
-                key=pub_key,
+            # ----- 可見性(三態下拉) -----
+            vis_key = f"vis_{cid}"
+            current_vis = cat.get("visibility") or (
+                "public" if cat.get("is_public", True) else "private"
+            )
+            if current_vis not in VIS_VALUES:
+                current_vis = "public"
+            cols[5].selectbox(
+                "可見性",
+                VIS_VALUES,
+                index=VIS_VALUES.index(current_vis),
+                format_func=lambda v: VIS_LABELS[v],
+                key=vis_key,
                 on_change=_update_cat_field,
-                args=(cid, "is_public", pub_key),
+                args=(cid, "visibility", vis_key),
                 label_visibility="collapsed",
             )
 
@@ -1304,6 +1380,29 @@ with tab_manage:
                 if cols[6].button("🗑️", key=f"del_cat_{cid}", help="刪除(連同所有記錄)"):
                     st.session_state[confirm_del_key] = True
                     st.rerun()
+
+            # ----- 分享名單第二行(只在 visibility=shared 顯示) -----
+            if current_vis == "shared":
+                share_key = f"share_{cid}"
+                if not shareable_user_ids:
+                    st.caption("⚠️ 還沒有其他使用者註冊,沒人可以選")
+                else:
+                    sub_cols = st.columns([2, 8, 0.5])
+                    sub_cols[0].markdown("&nbsp;&nbsp;&nbsp;└ **分享給**:")
+                    sub_cols[1].multiselect(
+                        "分享給",
+                        options=shareable_user_ids,
+                        default=[
+                            uid for uid in shares_by_cat.get(cid, [])
+                            if uid in shareable_user_ids
+                        ],
+                        format_func=lambda uid: name_map_mgr.get(uid, uid[:8]),
+                        key=share_key,
+                        on_change=_update_shares,
+                        args=(cid, share_key),
+                        label_visibility="collapsed",
+                        placeholder="選擇要分享的使用者...",
+                    )
 
     st.markdown("---")
 
@@ -1328,7 +1427,13 @@ with tab_manage:
         currency = cols[2].selectbox("預設幣別", ["TWD", "USD"])
         has_cost = cols[3].checkbox("有成本/現值", value=False)
         order = cols[4].number_input("顯示順序", min_value=0, max_value=99, value=99, step=1)
-        is_pub = cols[5].checkbox("公開", value=True, help="關掉變私人(只有自己看得到)")
+        new_vis = cols[5].selectbox(
+            "可見性",
+            VIS_VALUES,
+            index=1,  # 預設 public
+            format_func=lambda v: VIS_LABELS[v],
+            help="新增後可在上方清單調整,並設定『指定』模式的分享名單",
+        )
 
         if st.form_submit_button("新增", type="primary"):
             if not name.strip():
@@ -1344,10 +1449,14 @@ with tab_manage:
                             "has_cost_value": has_cost,
                             "display_order": order,
                             "is_active": True,
-                            "is_public": is_pub,
+                            "visibility": new_vis,
+                            "is_public": (new_vis == "public"),  # 同步舊欄位
                         }
                     ).execute()
-                    st.success("已新增")
+                    if new_vis == "shared":
+                        st.success("已新增,記得到上方清單設定分享名單!")
+                    else:
+                        st.success("已新增")
                     st.rerun()
                 except Exception as e:
                     st.error(f"新增失敗:{e}")
