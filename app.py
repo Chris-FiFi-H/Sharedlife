@@ -11,6 +11,7 @@ from utils import (
     render_sidebar,
     try_auto_login,
     save_session_cookie,
+    save_session_to_url,
     get_cookie_manager,
 )
 
@@ -99,7 +100,9 @@ else:
                             "access_token": response.session.access_token,
                             "refresh_token": response.session.refresh_token,
                         }
-                        # 存到 cookie,下次免登入
+                        # 同時存進 URL + cookie,下次重整免登入
+                        # URL 是主力(可靠),cookie 是備援
+                        save_session_to_url(response.session.refresh_token)
                         save_session_cookie(response.session.refresh_token)
                         st.success("登入成功!")
                         st.rerun()

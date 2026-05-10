@@ -1,5 +1,5 @@
 """
-共用工具:Supabase 連線、登入狀態管理、權限檢查、Cookie 持續登入
+共用工具:Supabase 連線、登入狀態管理、權限檢查、持續登入
 所有 page 都會 import 這裡的東西
 """
 from datetime import datetime, timedelta
@@ -10,11 +10,50 @@ import extra_streamlit_components as stx
 
 COOKIE_NAME = "sl_refresh"  # sl = sharedlife
 COOKIE_DAYS = 30
+URL_TOKEN_PARAM = "sl"  # URL query param key for refresh token
 
+
+# =====================================================================
+# URL query param 持久化(主力)
+# query param 是 URL 的一部分,瀏覽器重整時 100% 會帶過來,沒有時序問題。
+# 缺點:URL 會有一段長 token,但對 2-3 人小團體可接受。
+# 重要:Supabase 預設啟用 refresh token rotation,每次 refresh 會輪替 token,
+# 即便 URL 被人看到,他用一次就被 rotate 掉,原使用者仍能正常 refresh。
+# =====================================================================
+
+def save_session_to_url(refresh_token: str):
+    """把 refresh token 存進 URL query param。"""
+    if refresh_token:
+        try:
+            st.query_params[URL_TOKEN_PARAM] = refresh_token
+        except Exception:
+            pass
+
+
+def get_session_from_url():
+    """從 URL query param 讀 refresh token。重整時最可靠。"""
+    try:
+        return st.query_params.get(URL_TOKEN_PARAM)
+    except Exception:
+        return None
+
+
+def clear_session_from_url():
+    """登出時清掉 URL 上的 token。"""
+    try:
+        if URL_TOKEN_PARAM in st.query_params:
+            del st.query_params[URL_TOKEN_PARAM]
+    except Exception:
+        pass
+
+
+# =====================================================================
+# Cookie 持久化(備援,以防 URL 被清掉)
+# =====================================================================
 
 def get_cookie_manager():
     """
-    取得 CookieManager。整個 App 一個就好,但每次 rerun 都重新 fetch cookie。
+    取得 CookieManager。整個 App 一個就好。
     用 session_state 而不是 @st.cache_resource(會踩 cached widget 限制)。
     """
     if "_cookie_manager_instance" not in st.session_state:
@@ -58,7 +97,8 @@ def clear_session_cookie():
 
 def try_auto_login() -> str:
     """
-    用 cookie 中的 refresh_token 嘗試自動登入。
+    用 URL query param + cookie 中的 refresh_token 嘗試自動登入。
+    優先順序:URL(最可靠)→ cookie(備援)
 
     回傳值:
       "logged_in" - 已經登入,不用處理
@@ -69,27 +109,32 @@ def try_auto_login() -> str:
     if get_current_user():
         return "logged_in"
 
-    # 第一次進頁面時 CookieManager 才剛被初始化,瀏覽器 cookie 可能還沒回來。
-    # 這時 cookies dict 會是空的 — 但使用者「看起來」就是沒 cookie,跟「真的沒登入過」一樣。
-    # 解法:如果是這個 session 第一次嘗試 + cookies 空,先標記、rerun 一次給 cookie 時間到貨。
-    cm = get_cookie_manager()
-    try:
-        cookies = cm.get_all() or {}
-    except Exception:
-        cookies = {}
+    # ===== 第一優先:URL query param =====
+    # URL 是 request 的一部分,瀏覽器重整時 100% 帶過來,沒有時序問題
+    refresh_token = get_session_from_url()
+    source = "url" if refresh_token else None
 
-    refresh_token = cookies.get(COOKIE_NAME)
+    # ===== 第二優先:cookie 備援 =====
+    if not refresh_token:
+        cm = get_cookie_manager()
+        try:
+            cookies = cm.get_all() or {}
+        except Exception:
+            cookies = {}
 
-    # 還沒拿到任何 cookie:可能是 (a) 還沒從瀏覽器收到,(b) 真的沒登入過
-    # 如果這個 session 還沒重試過,給它一次重試的機會
-    if not cookies and not st.session_state.get("_cookie_retry_done"):
-        st.session_state._cookie_retry_done = True
-        return "waiting"
+        refresh_token = cookies.get(COOKIE_NAME)
+        if refresh_token:
+            source = "cookie"
+        else:
+            # cookie 還沒到貨?給 1 次重試機會
+            if not cookies and not st.session_state.get("_cookie_retry_done"):
+                st.session_state._cookie_retry_done = True
+                return "waiting"
 
     if not refresh_token:
         return "no_cookie"
 
-    # 真的有 token 了,試著用它登入
+    # ===== 真的有 token 了,用它登入 =====
     try:
         client = get_supabase()
         response = client.auth.refresh_session(refresh_token)
@@ -107,12 +152,15 @@ def try_auto_login() -> str:
                 "access_token": response.session.access_token,
                 "refresh_token": response.session.refresh_token,
             }
-            # 更新 cookie(refresh_token 可能被輪替了)
-            save_session_cookie(response.session.refresh_token)
+            # 同時更新 URL + cookie(refresh_token rotation 了,舊的會失效)
+            new_token = response.session.refresh_token
+            save_session_to_url(new_token)
+            save_session_cookie(new_token)
             return "success"
     except Exception:
-        # token 過期或無效,清掉 cookie
+        # token 過期或無效,兩邊都清
         clear_session_cookie()
+        clear_session_from_url()
 
     return "no_cookie"
 
@@ -194,13 +242,14 @@ def require_login():
 
 
 def logout():
-    """登出並清掉 session_state + cookie。"""
+    """登出並清掉 session_state + cookie + URL token。"""
     try:
         get_supabase().auth.sign_out()
     except Exception:
         pass
     clear_session_cookie()
-    for key in ("user", "auth_session", "_user_names_cache"):
+    clear_session_from_url()
+    for key in ("user", "auth_session", "_user_names_cache", "_cookie_retry_done"):
         st.session_state.pop(key, None)
 
 
