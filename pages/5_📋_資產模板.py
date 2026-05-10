@@ -25,6 +25,39 @@ require_login()
 render_sidebar()
 me = get_current_user()
 
+# 讓所有 selectbox 變成「純下拉」,使用者無法打字搜尋
+# 透過 CSS:
+#  - caret-color 透明 → 看不到游標
+#  - input 設成 readonly(用 attribute selector 觸發):無法輸入
+#  - cursor 改 pointer → 視覺上像按鈕而不是輸入框
+st.markdown("""
+<style>
+[data-baseweb="select"] input {
+    caret-color: transparent !important;
+    cursor: pointer !important;
+}
+/* 讓輸入框失去焦點時不會留下殘影 */
+[data-baseweb="select"] input:focus {
+    outline: none !important;
+}
+</style>
+<script>
+// 把所有 selectbox 的 input 設成 readonly,徹底防止打字
+(function() {
+    const setReadonly = () => {
+        document.querySelectorAll('[data-baseweb="select"] input').forEach(el => {
+            el.setAttribute('readonly', 'readonly');
+        });
+    };
+    setReadonly();
+    // 監聽 DOM 變化(Streamlit 重新 render 時 selectbox 會被重建)
+    new MutationObserver(setReadonly).observe(
+        document.body, { childList: true, subtree: true }
+    );
+})();
+</script>
+""", unsafe_allow_html=True)
+
 st.title("📋 資產模板")
 st.caption("追蹤每月個人總資產(支援多幣別)")
 
@@ -371,7 +404,7 @@ def _render_tab_monthly():
                     value=int(default_cost),
                     key=f"{base_key}_cost",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
-                    format="%d",
+                    format="%,d",
                     help="允許負數(例如未實現的負成本調整)",
                 )
                 current_value = cols[3].number_input(
@@ -380,7 +413,7 @@ def _render_tab_monthly():
                     value=int(default_value),
                     key=f"{base_key}_value",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
-                    format="%d",
+                    format="%,d",
                     help="允許負數(例如貸款、信用卡欠款等負債)",
                 )
                 if currency == "USD":
@@ -444,7 +477,7 @@ def _render_tab_monthly():
                     value=int(default_value),
                     key=f"{base_key}_value",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
-                    format="%d",
+                    format="%,d",
                     help="允許負數(例如貸款餘額、信用卡欠款等負債)",
                 )
                 if currency == "USD":
@@ -803,9 +836,9 @@ def _render_tab_chart():
         use_container_width=True,
         hide_index=True,
         column_config={
-            "原幣金額": st.column_config.NumberColumn(format="%.2f"),
+            "原幣金額": st.column_config.NumberColumn(format="%,.2f"),
             "匯率": st.column_config.NumberColumn(format="%.2f"),
-            "台幣金額": st.column_config.NumberColumn(format="%d"),
+            "台幣金額": st.column_config.NumberColumn(format="%,d"),
         },
     )
 
@@ -1176,9 +1209,9 @@ def _render_tab_combined():
         use_container_width=True,
         hide_index=True,
         column_config={
-            "原幣金額": st.column_config.NumberColumn(format="%.2f"),
+            "原幣金額": st.column_config.NumberColumn(format="%,.2f"),
             "匯率": st.column_config.NumberColumn(format="%.2f"),
-            "台幣金額": st.column_config.NumberColumn(format="%d"),
+            "台幣金額": st.column_config.NumberColumn(format="%,d"),
         },
     )
 
