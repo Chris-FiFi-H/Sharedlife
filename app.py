@@ -27,7 +27,14 @@ get_cookie_manager()
 
 # 嘗試從 cookie 自動登入
 if not get_current_user():
-    if try_auto_login():
+    auth_result = try_auto_login()
+    if auth_result == "success":
+        st.rerun()
+    elif auth_result == "waiting":
+        # cookie 還沒讀回來,顯示載入中,然後自動 rerun 再試一次
+        st.info("⏳ 載入中...")
+        import time
+        time.sleep(0.3)
         st.rerun()
 
 st.title("💰 記帳日誌")

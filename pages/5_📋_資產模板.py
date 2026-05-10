@@ -43,6 +43,13 @@ DEFAULT_TEMPLATE = [
     {"section": "investment", "name": "台新",     "default_currency": "TWD", "has_cost_value": True, "display_order": 2},
     {"section": "investment", "name": "複委託",   "default_currency": "USD", "has_cost_value": True, "display_order": 3},
     {"section": "investment", "name": "海外帳戶", "default_currency": "USD", "has_cost_value": True, "display_order": 4},
+    # 其他項目
+    {"section": "other", "name": "保險現值",     "default_currency": "TWD", "has_cost_value": False, "display_order": 1},
+    {"section": "other", "name": "現金",         "default_currency": "TWD", "has_cost_value": False, "display_order": 2},
+    {"section": "other", "name": "悠遊卡/iCash", "default_currency": "TWD", "has_cost_value": False, "display_order": 3},
+    {"section": "other", "name": "不動產",       "default_currency": "TWD", "has_cost_value": False, "display_order": 4},
+    {"section": "other", "name": "車輛",         "default_currency": "TWD", "has_cost_value": False, "display_order": 5},
+    {"section": "other", "name": "應收款",       "default_currency": "TWD", "has_cost_value": False, "display_order": 6},
 ]
 
 SECTION_ICONS = {"bank": "🏦", "investment": "📈", "other": "📦"}
@@ -96,6 +103,34 @@ def install_default_template():
         st.rerun()
     except Exception as e:
         st.error(f"建立失敗:{e}")
+
+
+def install_missing_defaults():
+    """只補上預設模板裡有、但使用者還沒建立的類別(用 (section, name) 比對)。"""
+    existing = (
+        get_supabase()
+        .table("asset_categories")
+        .select("section, name")
+        .eq("user_id", me["id"])
+        .execute()
+        .data
+    ) or []
+    existing_keys = {(c["section"], c["name"]) for c in existing}
+
+    missing = [
+        c for c in DEFAULT_TEMPLATE
+        if (c["section"], c["name"]) not in existing_keys
+    ]
+    if not missing:
+        st.toast("已經全部存在,沒有要補的", icon="✅")
+        return
+    rows = [{**c, "user_id": me["id"]} for c in missing]
+    try:
+        get_supabase().table("asset_categories").insert(rows).execute()
+        st.success(f"已補建 {len(rows)} 個類別!")
+        st.rerun()
+    except Exception as e:
+        st.error(f"補建失敗:{e}")
 
 
 def to_twd(amount, currency, rate):
@@ -218,19 +253,21 @@ with tab_monthly:
                 )
                 cost = cols[2].number_input(
                     "成本",
-                    min_value=0.0,
-                    step=100.0,
-                    value=default_cost,
+                    min_value=0,
+                    step=100,
+                    value=int(default_cost),
                     key=f"{base_key}_cost",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
+                    format="%d",
                 )
                 current_value = cols[3].number_input(
                     "現值",
-                    min_value=0.0,
-                    step=100.0,
-                    value=default_value,
+                    min_value=0,
+                    step=100,
+                    value=int(default_value),
                     key=f"{base_key}_value",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
+                    format="%d",
                 )
                 if currency == "USD":
                     rate = cols[4].number_input(
@@ -283,11 +320,12 @@ with tab_monthly:
                 )
                 current_value = cols[2].number_input(
                     "金額",
-                    min_value=0.0,
-                    step=100.0,
-                    value=default_value,
+                    min_value=0,
+                    step=100,
+                    value=int(default_value),
                     key=f"{base_key}_value",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
+                    format="%d",
                 )
                 if currency == "USD":
                     rate = cols[3].number_input(
@@ -1144,8 +1182,27 @@ with tab_manage:
         if st.button("📋 一鍵建立預設模板", type="primary"):
             install_default_template()
     else:
+        st.caption("👇 直接點欄位修改,改完按 Tab 或點外面就會自動儲存")
+
+        # ---------- 通用 update helper ----------
+        def _update_cat_field(cat_id, field, key):
+            new_val = st.session_state[key]
+            try:
+                # 名稱欄要去頭尾空白且不能空
+                if field == "name":
+                    new_val = (new_val or "").strip()
+                    if not new_val:
+                        st.toast("名稱不能空白", icon="⚠️")
+                        return
+                get_supabase().table("asset_categories").update(
+                    {field: new_val}
+                ).eq("id", cat_id).execute()
+                st.toast("已更新", icon="✅")
+            except Exception as e:
+                st.error(f"更新失敗:{e}")
+
         # 表頭
-        h = st.columns([1, 1.6, 0.8, 0.8, 0.7, 1, 0.6])
+        h = st.columns([1.2, 2, 0.9, 0.9, 0.7, 0.9, 0.5])
         h[0].markdown("**分區**")
         h[1].markdown("**名稱**")
         h[2].markdown("**幣別**")
@@ -1155,46 +1212,110 @@ with tab_manage:
         h[6].markdown("")
 
         for cat in categories:
-            cols = st.columns([1, 1.6, 0.8, 0.8, 0.7, 1, 0.6])
-            cols[0].text(SECTION_ICONS[cat["section"]] + " " + SECTION_NAMES[cat["section"]])
-            cols[1].text(cat["name"])
-            cols[2].text(cat["default_currency"])
-            cols[3].text("✓" if cat["has_cost_value"] else "—")
-            cols[4].text(str(cat["display_order"]))
+            cid = cat["id"]
+            cols = st.columns([1.2, 2, 0.9, 0.9, 0.7, 0.9, 0.5])
 
-            # 公開/私人 toggle
-            toggle_key = f"pub_{cat['id']}"
-
-            def _on_pub_change(cat_id=cat["id"], key=toggle_key):
-                new_val = st.session_state[key]
-                try:
-                    get_supabase().table("asset_categories").update(
-                        {"is_public": new_val}
-                    ).eq("id", cat_id).execute()
-                    st.toast(
-                        f"已改為{'🌐 公開' if new_val else '🔒 私人'}",
-                        icon="✅",
-                    )
-                except Exception as e:
-                    st.error(f"更新失敗:{e}")
-
-            cols[5].toggle(
-                "公開",
-                value=cat.get("is_public", True),
-                key=toggle_key,
-                on_change=_on_pub_change,
+            # ----- 分區(可改) -----
+            sec_key = f"sec_{cid}"
+            cols[0].selectbox(
+                "分區",
+                SECTION_ORDER,
+                index=SECTION_ORDER.index(cat["section"]),
+                format_func=lambda s: f"{SECTION_ICONS[s]} {SECTION_NAMES[s]}",
+                key=sec_key,
+                on_change=_update_cat_field,
+                args=(cid, "section", sec_key),
                 label_visibility="collapsed",
             )
 
-            if cols[6].button("🗑️", key=f"del_cat_{cat['id']}", help="刪除(連同記錄)"):
-                try:
-                    get_supabase().table("asset_categories").delete().eq(
-                        "id", cat["id"]
-                    ).execute()
-                    st.toast("已刪除", icon="✅")
+            # ----- 名稱(可改) -----
+            name_key = f"name_{cid}"
+            cols[1].text_input(
+                "名稱",
+                value=cat["name"],
+                key=name_key,
+                on_change=_update_cat_field,
+                args=(cid, "name", name_key),
+                label_visibility="collapsed",
+            )
+
+            # ----- 幣別(可改) -----
+            curr_key = f"curr_{cid}"
+            cols[2].selectbox(
+                "幣別",
+                ["TWD", "USD"],
+                index=0 if cat["default_currency"] == "TWD" else 1,
+                key=curr_key,
+                on_change=_update_cat_field,
+                args=(cid, "default_currency", curr_key),
+                label_visibility="collapsed",
+            )
+
+            # ----- 有成本(可改) -----
+            cost_key = f"cost_{cid}"
+            cols[3].checkbox(
+                "成本",
+                value=cat["has_cost_value"],
+                key=cost_key,
+                on_change=_update_cat_field,
+                args=(cid, "has_cost_value", cost_key),
+                label_visibility="collapsed",
+            )
+
+            # ----- 順序(可改) -----
+            ord_key = f"ord_{cid}"
+            cols[4].number_input(
+                "順序",
+                min_value=0,
+                max_value=99,
+                value=int(cat["display_order"]),
+                step=1,
+                key=ord_key,
+                on_change=_update_cat_field,
+                args=(cid, "display_order", ord_key),
+                label_visibility="collapsed",
+            )
+
+            # ----- 公開 toggle(可改) -----
+            pub_key = f"pub_{cid}"
+            cols[5].toggle(
+                "公開",
+                value=cat.get("is_public", True),
+                key=pub_key,
+                on_change=_update_cat_field,
+                args=(cid, "is_public", pub_key),
+                label_visibility="collapsed",
+            )
+
+            # ----- 刪除(二次確認) -----
+            confirm_del_key = f"confirm_del_cat_{cid}"
+            if st.session_state.get(confirm_del_key):
+                if cols[6].button("✓", key=f"yes_del_{cid}", help="確認刪除", type="primary"):
+                    try:
+                        get_supabase().table("asset_categories").delete().eq(
+                            "id", cid
+                        ).execute()
+                        st.session_state.pop(confirm_del_key, None)
+                        st.toast("已刪除", icon="✅")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"刪除失敗:{e}")
+            else:
+                if cols[6].button("🗑️", key=f"del_cat_{cid}", help="刪除(連同所有記錄)"):
+                    st.session_state[confirm_del_key] = True
                     st.rerun()
-                except Exception as e:
-                    st.error(f"刪除失敗:{e}")
+
+    st.markdown("---")
+
+    # 「補建缺漏的預設類別」按鈕(對舊使用者很實用)
+    with st.expander("📋 補建預設模板裡缺少的類別", expanded=False):
+        st.caption(
+            "如果你之前已經建過模板,但預設模板有更新(例如新增了「其他項目」區的"
+            "保險現值、現金、悠遊卡、不動產、車輛、應收款),按這個按鈕只會補上"
+            "你還沒建過的,不會動到你已有的類別。"
+        )
+        if st.button("🔍 檢查並補建缺漏"):
+            install_missing_defaults()
 
     st.markdown("---")
     st.subheader("➕ 新增類別")
