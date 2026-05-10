@@ -107,7 +107,7 @@ fig1 = px.line(
     color_discrete_map=COLOR_MAP,
 )
 fig1.update_layout(height=400, hovermode="x unified")
-st.plotly_chart(fig1, use_container_width=True)
+st.plotly_chart(fig1, use_container_width=True, key="analysis_daily_trend")
 
 
 # ---------- 圖 2:月度收支長條圖 ----------
@@ -130,7 +130,7 @@ fig2 = px.bar(
     text_auto=".0f",
 )
 fig2.update_layout(height=400)
-st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig2, use_container_width=True, key="analysis_monthly_bar")
 
 
 # ---------- 圖 3:支出分類圓餅圖 ----------
@@ -147,7 +147,7 @@ if not expense_df.empty:
     fig3 = px.pie(cat_sum, values="金額", names="分類", hole=0.4)
     fig3.update_traces(textposition="inside", textinfo="percent+label")
     fig3.update_layout(height=400)
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(fig3, use_container_width=True, key="analysis_category_pie")
 else:
     st.info("這段期間沒有支出")
 
@@ -171,7 +171,7 @@ if user_filter == "所有人" and df["使用者"].nunique() > 1:
         text_auto=".0f",
     )
     fig4.update_layout(height=400)
-    st.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig4, use_container_width=True, key="analysis_user_compare")
 
 
 # ---------- 圖 5:累計結餘走勢 ----------
@@ -190,4 +190,4 @@ daily_delta["累計結餘"] = daily_delta["當日淨額"].cumsum()
 fig5 = px.area(daily_delta, x="日期", y="累計結餘", markers=True)
 fig5.update_traces(line_color="#3b82f6", fillcolor="rgba(59,130,246,0.2)")
 fig5.update_layout(height=400)
-st.plotly_chart(fig5, use_container_width=True)
+st.plotly_chart(fig5, use_container_width=True, key="analysis_cumulative")

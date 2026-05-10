@@ -142,6 +142,120 @@ def to_twd(amount, currency, rate):
     return float(amount)
 
 
+def render_range_picker(key_prefix: str, available_years: list = None):
+    """
+    渲染時間範圍選擇 UI(含自訂),回傳 (start_date, end_date, label)。
+    - key_prefix: 不同 tab 用不同 prefix 避免 widget key 衝突
+    - available_years: 資料中有哪些年(從 df 算出來餵進來,若 None 則使用近 5 年)
+
+    回傳 (start: pd.Timestamp, end: pd.Timestamp, label: str)
+    """
+    today = pd.Timestamp.today().to_period("M").to_timestamp()
+    cur_year = today.year
+
+    if available_years:
+        available_years = sorted(set(available_years), reverse=True)
+    else:
+        available_years = list(range(cur_year, cur_year - 5, -1))
+
+    # 主下拉
+    base_options = [
+        "近 3 個月", "近 6 個月", "近 12 個月",
+        "今年", "去年", "前年",
+        "自訂年份", "自訂範圍", "全部",
+    ]
+    selected = st.selectbox(
+        "時間範圍",
+        base_options,
+        index=2,  # 預設近 12 個月
+        key=f"{key_prefix}_range_main",
+    )
+
+    start = end = None
+    label = selected
+
+    if selected == "近 3 個月":
+        end = today
+        start = today - pd.DateOffset(months=2)
+    elif selected == "近 6 個月":
+        end = today
+        start = today - pd.DateOffset(months=5)
+    elif selected == "近 12 個月":
+        end = today
+        start = today - pd.DateOffset(months=11)
+    elif selected == "今年":
+        start = pd.Timestamp(cur_year, 1, 1)
+        end = pd.Timestamp(cur_year, 12, 1)
+        label = f"{cur_year} 年"
+    elif selected == "去年":
+        start = pd.Timestamp(cur_year - 1, 1, 1)
+        end = pd.Timestamp(cur_year - 1, 12, 1)
+        label = f"{cur_year - 1} 年"
+    elif selected == "前年":
+        start = pd.Timestamp(cur_year - 2, 1, 1)
+        end = pd.Timestamp(cur_year - 2, 12, 1)
+        label = f"{cur_year - 2} 年"
+    elif selected == "自訂年份":
+        chosen_year = st.selectbox(
+            "選年份",
+            available_years,
+            key=f"{key_prefix}_range_year",
+        )
+        start = pd.Timestamp(chosen_year, 1, 1)
+        end = pd.Timestamp(chosen_year, 12, 1)
+        label = f"{chosen_year} 年"
+    elif selected == "自訂範圍":
+        cols = st.columns(4)
+        with cols[0]:
+            sy = st.selectbox(
+                "起始年", available_years,
+                index=min(len(available_years) - 1, 1) if len(available_years) > 1 else 0,
+                key=f"{key_prefix}_range_sy",
+            )
+        with cols[1]:
+            sm = st.selectbox(
+                "起始月", list(range(1, 13)),
+                index=0, format_func=lambda m: f"{m:02d}",
+                key=f"{key_prefix}_range_sm",
+            )
+        with cols[2]:
+            ey = st.selectbox(
+                "結束年", available_years,
+                index=0,
+                key=f"{key_prefix}_range_ey",
+            )
+        with cols[3]:
+            em = st.selectbox(
+                "結束月", list(range(1, 13)),
+                index=11, format_func=lambda m: f"{m:02d}",
+                key=f"{key_prefix}_range_em",
+            )
+        start = pd.Timestamp(sy, sm, 1)
+        end = pd.Timestamp(ey, em, 1)
+        if start > end:
+            st.warning("⚠️ 起始時間晚於結束時間,自動對調")
+            start, end = end, start
+        label = f"{sy}/{sm:02d} ~ {ey}/{em:02d}"
+    elif selected == "全部":
+        start = None
+        end = None
+        label = "全部"
+
+    return start, end, label
+
+
+def filter_df_by_range(df, start, end):
+    """套用時間範圍到 dataframe(預期 df 有 transaction_date 欄)。"""
+    if start is None and end is None:
+        return df
+    out = df.copy()
+    if start is not None:
+        out = out[out["transaction_date"] >= start]
+    if end is not None:
+        out = out[out["transaction_date"] <= end]
+    return out
+
+
 # ====== 五個 Tab ======
 tab_monthly, tab_chart, tab_combined, tab_io, tab_manage = st.tabs(
     ["📅 本月資產", "📈 資產走勢", "🤝 共同資產", "📤 匯入匯出", "⚙️ 管理類別"]
@@ -442,27 +556,9 @@ def _render_tab_chart():
     all_users = get_all_users()
     name_to_id = {(u["display_name"] or u["id"][:8]): u["id"] for u in all_users}
 
-    # ===== 篩選列 =====
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        view_options = ["我自己", "所有人"] + list(name_to_id.keys())
-        view_user = st.selectbox("看誰的資產", view_options, key="chart_user")
-    with c2:
-        # 快速時間範圍選擇
-        range_options = {
-            "近 3 個月": 3,
-            "近 6 個月": 6,
-            "近 12 個月": 12,
-            "今年": "ytd",
-            "全部": "all",
-        }
-        chart_range = st.radio(
-            "範圍",
-            list(range_options.keys()),
-            index=2,
-            horizontal=True,
-            key="chart_range",
-        )
+    # ===== 看誰的資產 =====
+    view_options = ["我自己", "所有人"] + list(name_to_id.keys())
+    view_user = st.selectbox("看誰的資產", view_options, key="chart_user")
 
     # ===== 取資料(全部,後面再過濾) =====
     try:
@@ -507,21 +603,15 @@ def _render_tab_chart():
     df["使用者"] = df["user_id"].map(lambda x: name_map.get(x, x[:8]))
     df["類別"] = df["asset_categories"].apply(lambda c: c["name"] if c else "?")
 
-    # ===== 套用時間範圍 =====
-    range_val = range_options[chart_range]
-    today_dt = pd.Timestamp.today().to_period("M").to_timestamp()
-    if range_val == "ytd":
-        start_dt = pd.Timestamp(today_dt.year, 1, 1)
-        df_ranged = df[df["transaction_date"] >= start_dt]
-    elif range_val == "all":
-        df_ranged = df
-    else:
-        # 整數月數
-        start_dt = today_dt - pd.DateOffset(months=range_val - 1)
-        df_ranged = df[df["transaction_date"] >= start_dt]
+    # ===== 時間範圍(用 helper) =====
+    available_years = sorted(df["transaction_date"].dt.year.unique().tolist())
+    range_start, range_end, range_label = render_range_picker(
+        "chart", available_years
+    )
+    df_ranged = filter_df_by_range(df, range_start, range_end)
 
     if df_ranged.empty:
-        st.warning(f"在範圍「{chart_range}」內沒有資料")
+        st.warning(f"在範圍「{range_label}」內沒有資料")
         return
 
     # ===== KPI 卡(只在「我自己」或單人時顯示) =====
@@ -575,7 +665,7 @@ def _render_tab_chart():
         fig.update_traces(line_color="#3b82f6", line_width=3)
     fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
     fig.update_layout(height=380, hovermode="x unified")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="chart_total")
 
     # ===== 圖 2:每月差額(本期 - 上期) =====
     if view_user != "所有人":
@@ -601,7 +691,7 @@ def _render_tab_chart():
                 height=320, hovermode="x unified",
                 yaxis_title="台幣變化", showlegend=False,
             )
-            st.plotly_chart(fig_diff, use_container_width=True)
+            st.plotly_chart(fig_diff, use_container_width=True, key="chart_monthly_diff")
         else:
             st.caption("(只有一個月的資料,還沒辦法算月差)")
 
@@ -623,7 +713,7 @@ def _render_tab_chart():
             },
         )
         fig2.update_layout(height=350, hovermode="x unified", legend_title_text="")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True, key="chart_section_area")
 
     # ===== 圖 4:投資成本 vs 現值 =====
     inv_df = df_ranged[df_ranged["section"] == "investment"].copy()
@@ -644,7 +734,7 @@ def _render_tab_chart():
             fill="tonexty", fillcolor="rgba(16,185,129,0.15)",
         ))
         fig3.update_layout(height=350, hovermode="x unified")
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, use_container_width=True, key="chart_inv_value_cost")
 
         # 損益 bar
         st.markdown("### 💰 投資損益")
@@ -659,7 +749,7 @@ def _render_tab_chart():
             textposition="outside",
         ))
         fig4.update_layout(height=300, hovermode="x unified", showlegend=False)
-        st.plotly_chart(fig4, use_container_width=True)
+        st.plotly_chart(fig4, use_container_width=True, key="chart_inv_pnl")
 
     # ===== 月份明細 =====
     st.divider()
@@ -839,35 +929,15 @@ def _render_tab_combined():
     df["分區名"] = df["分區"].map(SECTION_NAMES)
     df["類別"] = df["asset_categories"].apply(lambda c: c["name"] if c else "?")
 
-    # ===== 6. 時間範圍快選 =====
-    range_options = {
-        "近 3 個月": 3,
-        "近 6 個月": 6,
-        "近 12 個月": 12,
-        "今年": "ytd",
-        "全部": "all",
-    }
-    chart_range = st.radio(
-        "範圍",
-        list(range_options.keys()),
-        index=2,
-        horizontal=True,
-        key="combined_range",
+    # ===== 6. 時間範圍(用 helper) =====
+    available_years = sorted(df["transaction_date"].dt.year.unique().tolist())
+    range_start, range_end, range_label = render_range_picker(
+        "combined", available_years
     )
-
-    range_val = range_options[chart_range]
-    today_dt = pd.Timestamp.today().to_period("M").to_timestamp()
-    if range_val == "ytd":
-        start_dt = pd.Timestamp(today_dt.year, 1, 1)
-        df_ranged = df[df["transaction_date"] >= start_dt]
-    elif range_val == "all":
-        df_ranged = df
-    else:
-        start_dt = today_dt - pd.DateOffset(months=range_val - 1)
-        df_ranged = df[df["transaction_date"] >= start_dt]
+    df_ranged = filter_df_by_range(df, range_start, range_end)
 
     if df_ranged.empty:
-        st.warning(f"在範圍「{chart_range}」內沒有資料")
+        st.warning(f"在範圍「{range_label}」內沒有資料")
         return
 
     # ===== 7. KPI 摘要卡 =====
@@ -954,7 +1024,7 @@ def _render_tab_combined():
     )
     fig_trend.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
     fig_trend.update_layout(height=400, hovermode="x unified")
-    st.plotly_chart(fig_trend, use_container_width=True)
+    st.plotly_chart(fig_trend, use_container_width=True, key="combined_trend")
 
     # ===== 9. 每月變化 bar =====
     st.markdown("### 📊 每月變化")
@@ -978,7 +1048,7 @@ def _render_tab_combined():
             height=320, hovermode="x unified",
             yaxis_title="台幣變化", showlegend=False,
         )
-        st.plotly_chart(fig_diff, use_container_width=True)
+        st.plotly_chart(fig_diff, use_container_width=True, key="combined_monthly_diff")
     else:
         st.caption("(只有一個月的資料,還沒辦法算月差)")
 
@@ -1002,7 +1072,7 @@ def _render_tab_combined():
             fig_stack.update_layout(
                 height=350, hovermode="x unified", legend_title_text=""
             )
-            st.plotly_chart(fig_stack, use_container_width=True)
+            st.plotly_chart(fig_stack, use_container_width=True, key="combined_user_stack")
             st.caption("ℹ️ 此圖只計入正資產,負債(負數)不參與堆疊。")
 
     st.divider()
@@ -1071,7 +1141,7 @@ def _render_tab_combined():
             )
             fig_sec.update_traces(textposition="inside", textinfo="percent+label")
             fig_sec.update_layout(height=320, showlegend=False)
-            st.plotly_chart(fig_sec, use_container_width=True)
+            st.plotly_chart(fig_sec, use_container_width=True, key="combined_section_pie")
         else:
             st.caption("(本月沒有正資產)")
 
@@ -1082,7 +1152,7 @@ def _render_tab_combined():
             fig_user = px.pie(per_user_pie, values="TWD", names="使用者", hole=0.4)
             fig_user.update_traces(textposition="inside", textinfo="percent+label")
             fig_user.update_layout(height=320, showlegend=False)
-            st.plotly_chart(fig_user, use_container_width=True)
+            st.plotly_chart(fig_user, use_container_width=True, key="combined_user_pie")
         else:
             st.caption("(只有一個人,不顯示)")
 
