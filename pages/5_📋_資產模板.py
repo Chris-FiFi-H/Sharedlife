@@ -253,21 +253,21 @@ def _render_tab_monthly():
                 )
                 cost = cols[2].number_input(
                     "成本",
-                    min_value=0,
                     step=100,
                     value=int(default_cost),
                     key=f"{base_key}_cost",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
                     format="%d",
+                    help="允許負數(例如未實現的負成本調整)",
                 )
                 current_value = cols[3].number_input(
                     "現值",
-                    min_value=0,
                     step=100,
                     value=int(default_value),
                     key=f"{base_key}_value",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
                     format="%d",
+                    help="允許負數(例如貸款、信用卡欠款等負債)",
                 )
                 if currency == "USD":
                     rate = cols[4].number_input(
@@ -287,8 +287,14 @@ def _render_tab_monthly():
                 pnl = value_twd - cost_twd
 
                 pnl_color = "🟢" if pnl >= 0 else "🔴"
+                # 負數現值用紅字標示(代表負債)
+                value_html = (
+                    f"<span style='color:#ef4444'>NT${value_twd:,.0f}</span>"
+                    if value_twd < 0
+                    else f"NT${value_twd:,.0f}"
+                )
                 cols[5].markdown(
-                    f"NT${value_twd:,.0f}<br>"
+                    f"{value_html}<br>"
                     f"<small>{pnl_color} {pnl:+,.0f}</small>",
                     unsafe_allow_html=True,
                 )
@@ -320,12 +326,12 @@ def _render_tab_monthly():
                 )
                 current_value = cols[2].number_input(
                     "金額",
-                    min_value=0,
                     step=100,
                     value=int(default_value),
                     key=f"{base_key}_value",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
                     format="%d",
+                    help="允許負數(例如貸款餘額、信用卡欠款等負債)",
                 )
                 if currency == "USD":
                     rate = cols[3].number_input(
@@ -341,7 +347,14 @@ def _render_tab_monthly():
                     rate = 1.0
 
                 value_twd = to_twd(current_value, currency, rate)
-                cols[4].markdown(f"NT${value_twd:,.0f}")
+                # 負數紅字顯示(代表負債)
+                if value_twd < 0:
+                    cols[4].markdown(
+                        f"<span style='color:#ef4444'>NT${value_twd:,.0f}</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    cols[4].markdown(f"NT${value_twd:,.0f}")
 
                 section_total += value_twd
                 pending_rows.append(
@@ -429,12 +442,29 @@ def _render_tab_chart():
     all_users = get_all_users()
     name_to_id = {(u["display_name"] or u["id"][:8]): u["id"] for u in all_users}
 
+    # ===== 篩選列 =====
     c1, c2 = st.columns([1, 2])
     with c1:
         view_options = ["我自己", "所有人"] + list(name_to_id.keys())
         view_user = st.selectbox("看誰的資產", view_options, key="chart_user")
+    with c2:
+        # 快速時間範圍選擇
+        range_options = {
+            "近 3 個月": 3,
+            "近 6 個月": 6,
+            "近 12 個月": 12,
+            "今年": "ytd",
+            "全部": "all",
+        }
+        chart_range = st.radio(
+            "範圍",
+            list(range_options.keys()),
+            index=2,
+            horizontal=True,
+            key="chart_range",
+        )
 
-    # 取資料
+    # ===== 取資料(全部,後面再過濾) =====
     try:
         query = (
             get_supabase()
@@ -456,39 +486,130 @@ def _render_tab_chart():
         st.info("還沒有資料,先到「📅 本月資產」儲存幾筆吧!")
         return
 
-    # 整理 dataframe
+    # ===== 整理 dataframe =====
     df = pd.DataFrame(records)
-    df["年月"] = df.apply(lambda r: f"{r['year']:04d}-{r['month']:02d}", axis=1)
+    df["transaction_date"] = pd.to_datetime(
+        df.apply(lambda r: f"{r['year']:04d}-{r['month']:02d}-01", axis=1)
+    )
+    df["年月"] = df["transaction_date"].dt.strftime("%Y-%m")
     df["TWD"] = df.apply(
         lambda r: to_twd(r["current_value"], r["currency"], r["exchange_rate"]),
         axis=1,
     )
-    df["section"] = df["asset_categories"].apply(lambda c: c["section"] if c else "other")
+    df["cost_TWD"] = df.apply(
+        lambda r: to_twd(r.get("cost") or 0, r["currency"], r["exchange_rate"]),
+        axis=1,
+    )
+    df["section"] = df["asset_categories"].apply(
+        lambda c: c["section"] if c else "other"
+    )
     df["section_name"] = df["section"].map(SECTION_NAMES)
+    df["使用者"] = df["user_id"].map(lambda x: name_map.get(x, x[:8]))
+    df["類別"] = df["asset_categories"].apply(lambda c: c["name"] if c else "?")
 
-    # ---------- 總資產走勢線圖 ----------
-    st.subheader("💎 總資產走勢")
+    # ===== 套用時間範圍 =====
+    range_val = range_options[chart_range]
+    today_dt = pd.Timestamp.today().to_period("M").to_timestamp()
+    if range_val == "ytd":
+        start_dt = pd.Timestamp(today_dt.year, 1, 1)
+        df_ranged = df[df["transaction_date"] >= start_dt]
+    elif range_val == "all":
+        df_ranged = df
+    else:
+        # 整數月數
+        start_dt = today_dt - pd.DateOffset(months=range_val - 1)
+        df_ranged = df[df["transaction_date"] >= start_dt]
+
+    if df_ranged.empty:
+        st.warning(f"在範圍「{chart_range}」內沒有資料")
+        return
+
+    # ===== KPI 卡(只在「我自己」或單人時顯示) =====
+    if view_user != "所有人":
+        monthly_total = df_ranged.groupby("年月")["TWD"].sum().sort_index()
+        if len(monthly_total) >= 1:
+            latest_total = monthly_total.iloc[-1]
+            first_total = monthly_total.iloc[0]
+            change = latest_total - first_total
+            avg_change = (
+                (latest_total - first_total) / max(len(monthly_total) - 1, 1)
+                if len(monthly_total) > 1
+                else 0
+            )
+            high_month = monthly_total.idxmax()
+            low_month = monthly_total.idxmin()
+
+            st.markdown("### 📊 區間摘要")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric(
+                f"最新 ({monthly_total.index[-1]})",
+                f"NT$ {latest_total:,.0f}",
+            )
+            k2.metric(
+                "區間變化",
+                f"NT$ {change:+,.0f}",
+                delta=f"{(change / abs(first_total) * 100):+.1f}%"
+                if first_total != 0 else None,
+            )
+            k3.metric("平均月增", f"NT$ {avg_change:+,.0f}")
+            k4.metric(
+                "最高 / 最低",
+                f"{high_month}",
+                delta=f"低點 {low_month}",
+                delta_color="off",
+            )
+            st.divider()
+
+    # ===== 圖 1:總資產走勢 =====
+    st.markdown("### 💎 總資產走勢")
     if view_user == "所有人":
-        # 用 user 分組
-        df["使用者"] = df["user_id"].map(lambda x: name_map.get(x, x[:8]))
         total_by_month = (
-            df.groupby(["年月", "使用者"])["TWD"].sum().reset_index()
+            df_ranged.groupby(["年月", "使用者"])["TWD"].sum().reset_index()
         )
         fig = px.line(
             total_by_month, x="年月", y="TWD", color="使用者", markers=True
         )
     else:
-        total_by_month = df.groupby("年月")["TWD"].sum().reset_index()
+        total_by_month = df_ranged.groupby("年月")["TWD"].sum().reset_index()
         fig = px.line(total_by_month, x="年月", y="TWD", markers=True)
-        fig.update_traces(line_color="#3b82f6")
-    fig.update_layout(height=400, hovermode="x unified")
+        fig.update_traces(line_color="#3b82f6", line_width=3)
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
+    fig.update_layout(height=380, hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
 
-    # ---------- 分區堆疊面積圖 ----------
-    st.subheader("📊 資產組成(依分區)")
+    # ===== 圖 2:每月差額(本期 - 上期) =====
     if view_user != "所有人":
+        st.markdown("### 📈 每月變化")
+        mt = df_ranged.groupby("年月")["TWD"].sum().sort_index()
+        diff = mt.diff().dropna()
+        if len(diff) > 0:
+            diff_df = diff.reset_index()
+            diff_df.columns = ["年月", "變化"]
+            fig_diff = go.Figure()
+            fig_diff.add_trace(
+                go.Bar(
+                    x=diff_df["年月"],
+                    y=diff_df["變化"],
+                    marker_color=[
+                        "#10b981" if v >= 0 else "#ef4444" for v in diff_df["變化"]
+                    ],
+                    text=diff_df["變化"].apply(lambda v: f"{v:+,.0f}"),
+                    textposition="outside",
+                )
+            )
+            fig_diff.update_layout(
+                height=320, hovermode="x unified",
+                yaxis_title="台幣變化", showlegend=False,
+            )
+            st.plotly_chart(fig_diff, use_container_width=True)
+        else:
+            st.caption("(只有一個月的資料,還沒辦法算月差)")
+
+    # ===== 圖 3:依分區堆疊面積 =====
+    if view_user != "所有人":
+        st.markdown("### 📊 資產組成(依分區)")
         section_by_month = (
-            df.groupby(["年月", "section_name"])["TWD"].sum().reset_index()
+            df_ranged.groupby(["年月", "section_name"])["TWD"].sum().reset_index()
         )
         fig2 = px.area(
             section_by_month,
@@ -501,53 +622,102 @@ def _render_tab_chart():
                 "其他項目": "#f59e0b",
             },
         )
-        fig2.update_layout(height=400, hovermode="x unified")
+        fig2.update_layout(height=350, hovermode="x unified", legend_title_text="")
         st.plotly_chart(fig2, use_container_width=True)
-    else:
-        st.caption("(看「所有人」時不顯示分區圖,請選特定使用者)")
 
-    # ---------- 投資帳戶損益走勢 ----------
-    inv_df = df[df["section"] == "investment"].copy()
+    # ===== 圖 4:投資成本 vs 現值 =====
+    inv_df = df_ranged[df_ranged["section"] == "investment"].copy()
     if not inv_df.empty and view_user != "所有人":
-        inv_df["cost_twd"] = inv_df.apply(
-            lambda r: to_twd(r.get("cost") or 0, r["currency"], r["exchange_rate"]),
-            axis=1,
-        )
-        inv_df["損益"] = inv_df["TWD"] - inv_df["cost_twd"]
-        pnl_by_month = inv_df.groupby("年月")[["TWD", "cost_twd", "損益"]].sum().reset_index()
-        st.subheader("📈 投資損益走勢")
+        st.markdown("### 📈 投資:成本 vs 現值")
+        inv_monthly = inv_df.groupby("年月")[["TWD", "cost_TWD"]].sum().reset_index()
+        inv_monthly["損益"] = inv_monthly["TWD"] - inv_monthly["cost_TWD"]
         fig3 = go.Figure()
-        fig3.add_trace(
-            go.Bar(
-                x=pnl_by_month["年月"],
-                y=pnl_by_month["損益"],
-                name="損益",
-                marker_color=[
-                    "#10b981" if v >= 0 else "#ef4444" for v in pnl_by_month["損益"]
-                ],
-            )
-        )
+        fig3.add_trace(go.Scatter(
+            x=inv_monthly["年月"], y=inv_monthly["cost_TWD"],
+            name="成本", mode="lines+markers",
+            line=dict(color="#94a3b8", dash="dot"),
+        ))
+        fig3.add_trace(go.Scatter(
+            x=inv_monthly["年月"], y=inv_monthly["TWD"],
+            name="現值", mode="lines+markers",
+            line=dict(color="#10b981", width=3),
+            fill="tonexty", fillcolor="rgba(16,185,129,0.15)",
+        ))
         fig3.update_layout(height=350, hovermode="x unified")
         st.plotly_chart(fig3, use_container_width=True)
 
-    # ---------- 最新一筆明細 ----------
-    if view_user != "所有人":
-        latest_ym = df["年月"].max()
-        st.subheader(f"📋 {latest_ym} 明細")
-        latest_df = df[df["年月"] == latest_ym].copy()
-        latest_df["類別"] = latest_df["asset_categories"].apply(
-            lambda c: c["name"] if c else "?"
-        )
-        show_df = latest_df[["section_name", "類別", "currency", "current_value", "exchange_rate", "TWD"]].rename(
-            columns={
-                "section_name": "分區",
-                "currency": "幣別",
-                "current_value": "原幣金額",
-                "exchange_rate": "匯率",
-                "TWD": "台幣金額",
-            }
-        )
-        st.dataframe(show_df, use_container_width=True, hide_index=True)
+        # 損益 bar
+        st.markdown("### 💰 投資損益")
+        fig4 = go.Figure()
+        fig4.add_trace(go.Bar(
+            x=inv_monthly["年月"], y=inv_monthly["損益"],
+            marker_color=[
+                "#10b981" if v >= 0 else "#ef4444"
+                for v in inv_monthly["損益"]
+            ],
+            text=inv_monthly["損益"].apply(lambda v: f"{v:+,.0f}"),
+            textposition="outside",
+        ))
+        fig4.update_layout(height=300, hovermode="x unified", showlegend=False)
+        st.plotly_chart(fig4, use_container_width=True)
+
+    # ===== 月份明細 =====
+    st.divider()
+    st.markdown("### 📋 月份明細")
+
+    if view_user == "所有人":
+        st.caption("(看「所有人」時無法選單一月份明細,請選特定使用者)")
+        return
+
+    available_ym = sorted(df["年月"].unique(), reverse=True)
+    if not available_ym:
+        return
+
+    selected_ym = st.selectbox(
+        "選擇月份",
+        available_ym,
+        index=0,
+        key="chart_detail_ym",
+    )
+
+    detail_df = df[df["年月"] == selected_ym].copy()
+    if detail_df.empty:
+        st.info("這個月沒有資料")
+        return
+
+    # 摘要
+    total = detail_df["TWD"].sum()
+    pos_sum = detail_df.loc[detail_df["TWD"] >= 0, "TWD"].sum()
+    neg_sum = detail_df.loc[detail_df["TWD"] < 0, "TWD"].sum()
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric("總計", f"NT$ {total:,.0f}")
+    s2.metric("正資產", f"NT$ {pos_sum:,.0f}")
+    s3.metric("負債", f"NT$ {neg_sum:,.0f}", delta_color="off")
+
+    # 表格(負數紅色)
+    show_df = detail_df[
+        ["section_name", "類別", "currency", "current_value", "exchange_rate", "TWD"]
+    ].rename(
+        columns={
+            "section_name": "分區",
+            "currency": "幣別",
+            "current_value": "原幣金額",
+            "exchange_rate": "匯率",
+            "TWD": "台幣金額",
+        }
+    ).sort_values(["分區", "類別"])
+
+    st.dataframe(
+        show_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "原幣金額": st.column_config.NumberColumn(format="%.2f"),
+            "匯率": st.column_config.NumberColumn(format="%.2f"),
+            "台幣金額": st.column_config.NumberColumn(format="%d"),
+        },
+    )
 
 
 # 在 tab 中執行該函式
