@@ -404,7 +404,7 @@ def _render_tab_monthly():
                     value=int(default_cost),
                     key=f"{base_key}_cost",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
-                    format="%,d",
+                    format="%d",
                     help="允許負數(例如未實現的負成本調整)",
                 )
                 current_value = cols[3].number_input(
@@ -413,7 +413,7 @@ def _render_tab_monthly():
                     value=int(default_value),
                     key=f"{base_key}_value",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
-                    format="%,d",
+                    format="%d",
                     help="允許負數(例如貸款、信用卡欠款等負債)",
                 )
                 if currency == "USD":
@@ -477,7 +477,7 @@ def _render_tab_monthly():
                     value=int(default_value),
                     key=f"{base_key}_value",
                     label_visibility="visible" if cat == cats_in_section[0] else "collapsed",
-                    format="%,d",
+                    format="%d",
                     help="允許負數(例如貸款餘額、信用卡欠款等負債)",
                 )
                 if currency == "USD":
