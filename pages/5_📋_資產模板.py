@@ -151,7 +151,7 @@ tab_monthly, tab_chart, tab_combined, tab_io, tab_manage = st.tabs(
 # =====================================================================
 #  Tab 1:本月資產
 # =====================================================================
-with tab_monthly:
+def _render_tab_monthly():
     categories = get_my_categories()
 
     if not categories:
@@ -164,7 +164,7 @@ with tab_monthly:
             install_default_template()
 
         st.info("**選項 2**:到「⚙️ 管理類別」分頁自己一個一個加")
-        st.stop()
+        return
 
     # ---------- 月份選擇 ----------
     today = date.today()
@@ -424,7 +424,7 @@ with tab_monthly:
 # =====================================================================
 #  Tab 2:資產走勢
 # =====================================================================
-with tab_chart:
+def _render_tab_chart():
     name_map = user_id_to_name_map()
     all_users = get_all_users()
     name_to_id = {(u["display_name"] or u["id"][:8]): u["id"] for u in all_users}
@@ -454,7 +454,7 @@ with tab_chart:
 
     if not records:
         st.info("還沒有資料,先到「📅 本月資產」儲存幾筆吧!")
-        st.stop()
+        return
 
     # 整理 dataframe
     df = pd.DataFrame(records)
@@ -550,10 +550,17 @@ with tab_chart:
         st.dataframe(show_df, use_container_width=True, hide_index=True)
 
 
+# 在 tab 中執行該函式
+with tab_monthly:
+    _render_tab_monthly()
+with tab_chart:
+    _render_tab_chart()
+
+
 # =====================================================================
 #  Tab 3:共同資產
 # =====================================================================
-with tab_combined:
+def _render_tab_combined():
     st.caption(
         "把幾個人的公開資產合在一起算總額,適合追蹤家庭/伴侶/合夥的共同資產。"
         "私人類別不會出現在這裡。"
@@ -576,7 +583,7 @@ with tab_combined:
 
     if not selected_user_ids:
         st.info("👆 至少選一個使用者")
-        st.stop()
+        return
 
     # ---------- 2. 月份 ----------
     today_c = date.today()
@@ -617,7 +624,7 @@ with tab_combined:
 
     if not visible_cats:
         st.info("沒有可看到的類別(對方可能還沒建立或全部設為私人)")
-        st.stop()
+        return
 
     # ---------- 4. 多選要納入的類別(預設全選) ----------
     VIS_ICON_MAP = {"private": "🔒", "public": "🌐", "shared": "👥"}
@@ -642,7 +649,7 @@ with tab_combined:
 
     if not selected_cat_ids:
         st.info("👆 至少選一個類別")
-        st.stop()
+        return
 
     # ---------- 5. 取出該月份的記錄 ----------
     try:
@@ -663,7 +670,7 @@ with tab_combined:
 
     if not ma_records:
         st.warning(f"{c_year}/{c_month:02d} 這幾位使用者還沒輸入資料")
-        st.stop()
+        return
 
     # ---------- 6. 整理 + 顯示 ----------
     df = pd.DataFrame(ma_records)
@@ -832,6 +839,11 @@ with tab_combined:
         )
         fig_trend.update_layout(height=400, hovermode="x unified")
         st.plotly_chart(fig_trend, use_container_width=True)
+
+
+# 在 tab 中執行該函式
+with tab_combined:
+    _render_tab_combined()
 
 
 # =====================================================================
