@@ -732,16 +732,15 @@ with tab_chart:
 # =====================================================================
 def _render_tab_combined():
     st.caption(
-        "把幾個人的公開資產合在一起算總額,適合追蹤家庭/伴侶/合夥的共同資產。"
-        "私人類別不會出現在這裡。"
+        "把幾個人允許的資產合在一起算總額,適合追蹤家庭/伴侶/合夥的共同資產。"
+        "私人類別、以及你沒被分享的『指定』類別不會出現在這裡。"
     )
 
     name_map_c = user_id_to_name_map()
     all_users_c = get_all_users()
 
-    # ---------- 1. 選擇要納入的使用者 ----------
+    # ===== 1. 選擇要納入的使用者 =====
     user_id_options = [u["id"] for u in all_users_c]
-
     selected_user_ids = st.multiselect(
         "包含的使用者(可多選)",
         options=user_id_options,
@@ -750,32 +749,11 @@ def _render_tab_combined():
         + (" (我)" if uid == me["id"] else ""),
         key="combined_users",
     )
-
     if not selected_user_ids:
         st.info("👆 至少選一個使用者")
         return
 
-    # ---------- 2. 月份 ----------
-    today_c = date.today()
-    cy, cm = st.columns(2)
-    with cy:
-        c_year = st.selectbox(
-            "年份",
-            list(range(today_c.year - 5, today_c.year + 2)),
-            index=5,
-            key="combined_year",
-        )
-    with cm:
-        c_month = st.selectbox(
-            "月份",
-            list(range(1, 13)),
-            index=today_c.month - 1,
-            format_func=lambda m: f"{m:02d} 月",
-            key="combined_month",
-        )
-
-    # ---------- 3. 取出對選擇者可見的所有類別 ----------
-    # RLS 會自動過濾(只回傳自己的 + 別人公開的)
+    # ===== 2. 取出對選擇者可見的所有類別 =====
     try:
         cats_q = (
             get_supabase()
@@ -796,14 +774,13 @@ def _render_tab_combined():
         st.info("沒有可看到的類別(對方可能還沒建立或全部設為私人)")
         return
 
-    # ---------- 4. 多選要納入的類別(預設全選) ----------
+    # ===== 3. 多選要納入的類別(預設全選) =====
     VIS_ICON_MAP = {"private": "🔒", "public": "🌐", "shared": "👥"}
     cat_label_map = {}
     for cat in visible_cats:
         owner = name_map_c.get(cat["user_id"], cat["user_id"][:8])
         vis = cat.get("visibility") or ("public" if cat.get("is_public") else "private")
         vis_icon = VIS_ICON_MAP.get(vis, "")
-        # 自己的類別不重複標 icon(避免雜訊)
         if cat["user_id"] == me["id"]:
             vis_icon = ""
         label = f"{owner}・{SECTION_ICONS[cat['section']]} {cat['name']} {vis_icon}".strip()
@@ -816,34 +793,37 @@ def _render_tab_combined():
         format_func=lambda cid: cat_label_map[cid],
         key="combined_cats",
     )
-
     if not selected_cat_ids:
         st.info("👆 至少選一個類別")
         return
 
-    # ---------- 5. 取出該月份的記錄 ----------
+    # ===== 4. 取所有可見的月度資料 =====
     try:
-        ma_q = (
+        all_q = (
             get_supabase()
             .table("monthly_assets")
             .select("*, asset_categories(name, section, has_cost_value)")
             .in_("user_id", selected_user_ids)
             .in_("category_id", selected_cat_ids)
-            .eq("year", c_year)
-            .eq("month", c_month)
+            .order("year")
+            .order("month")
             .execute()
         )
-        ma_records = ma_q.data or []
+        all_records = all_q.data or []
     except Exception as e:
         st.error(f"讀取資產失敗:{e}")
-        ma_records = []
+        all_records = []
 
-    if not ma_records:
-        st.warning(f"{c_year}/{c_month:02d} 這幾位使用者還沒輸入資料")
+    if not all_records:
+        st.warning("這些使用者 / 類別還沒有任何資料")
         return
 
-    # ---------- 6. 整理 + 顯示 ----------
-    df = pd.DataFrame(ma_records)
+    # ===== 5. 整理 dataframe =====
+    df = pd.DataFrame(all_records)
+    df["transaction_date"] = pd.to_datetime(
+        df.apply(lambda r: f"{r['year']:04d}-{r['month']:02d}-01", axis=1)
+    )
+    df["年月"] = df["transaction_date"].dt.strftime("%Y-%m")
     df["TWD"] = df.apply(
         lambda r: to_twd(r["current_value"], r["currency"], r["exchange_rate"]),
         axis=1,
@@ -859,83 +839,270 @@ def _render_tab_combined():
     df["分區名"] = df["分區"].map(SECTION_NAMES)
     df["類別"] = df["asset_categories"].apply(lambda c: c["name"] if c else "?")
 
-    # 大標總額
-    grand_combined = df["TWD"].sum()
-    total_cost = df["cost_TWD"].sum()
-    st.markdown("### 💎 共同總資產")
-    cols = st.columns(3)
-    cols[0].metric(f"{c_year}/{c_month:02d} 總額", f"NT$ {grand_combined:,.0f}")
-    if total_cost > 0:
-        cols[1].metric("投資成本合計", f"NT$ {total_cost:,.0f}")
-        pnl = df["TWD"].where(df["cost_TWD"] > 0, 0).sum() - total_cost
-        cols[2].metric(
-            "投資未實現損益",
+    # ===== 6. 時間範圍快選 =====
+    range_options = {
+        "近 3 個月": 3,
+        "近 6 個月": 6,
+        "近 12 個月": 12,
+        "今年": "ytd",
+        "全部": "all",
+    }
+    chart_range = st.radio(
+        "範圍",
+        list(range_options.keys()),
+        index=2,
+        horizontal=True,
+        key="combined_range",
+    )
+
+    range_val = range_options[chart_range]
+    today_dt = pd.Timestamp.today().to_period("M").to_timestamp()
+    if range_val == "ytd":
+        start_dt = pd.Timestamp(today_dt.year, 1, 1)
+        df_ranged = df[df["transaction_date"] >= start_dt]
+    elif range_val == "all":
+        df_ranged = df
+    else:
+        start_dt = today_dt - pd.DateOffset(months=range_val - 1)
+        df_ranged = df[df["transaction_date"] >= start_dt]
+
+    if df_ranged.empty:
+        st.warning(f"在範圍「{chart_range}」內沒有資料")
+        return
+
+    # ===== 7. KPI 摘要卡 =====
+    st.markdown("### 💎 共同資產摘要")
+    monthly_total = df_ranged.groupby("年月")["TWD"].sum().sort_index()
+
+    latest_total = monthly_total.iloc[-1]
+    first_total = monthly_total.iloc[0] if len(monthly_total) > 0 else 0
+    change = latest_total - first_total
+    avg_change = (
+        change / max(len(monthly_total) - 1, 1)
+        if len(monthly_total) > 1
+        else 0
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(
+        f"最新 ({monthly_total.index[-1]})",
+        f"NT$ {latest_total:,.0f}",
+    )
+    k2.metric(
+        "區間變化",
+        f"NT$ {change:+,.0f}",
+        delta=f"{(change / abs(first_total) * 100):+.1f}%"
+        if first_total != 0 else None,
+    )
+    k3.metric("平均月增", f"NT$ {avg_change:+,.0f}")
+    k4.metric(
+        "最高 / 最低",
+        f"{monthly_total.idxmax()}",
+        delta=f"低點 {monthly_total.idxmin()}",
+        delta_color="off",
+    )
+
+    # 投資成本/損益(如果有)
+    has_inv = (df_ranged["cost_TWD"] != 0).any()
+    if has_inv:
+        latest_ym = monthly_total.index[-1]
+        latest_df = df_ranged[df_ranged["年月"] == latest_ym]
+        total_cost = latest_df["cost_TWD"].sum()
+        total_inv_value = latest_df.loc[latest_df["cost_TWD"] != 0, "TWD"].sum()
+        pnl = total_inv_value - total_cost
+
+        i1, i2, i3 = st.columns(3)
+        i1.metric("投資成本(本月)", f"NT$ {total_cost:,.0f}")
+        i2.metric("投資現值(本月)", f"NT$ {total_inv_value:,.0f}")
+        i3.metric(
+            "未實現損益",
             f"NT$ {pnl:+,.0f}",
-            delta=f"{pnl/total_cost*100:+.1f}%" if total_cost > 0 else None,
+            delta=f"{pnl / total_cost * 100:+.1f}%" if total_cost > 0 else None,
         )
 
     st.divider()
 
-    # 各人小計
-    st.markdown("### 👥 各人小計")
-    per_user = df.groupby("使用者")["TWD"].sum().reset_index().sort_values("TWD", ascending=False)
-    user_cols = st.columns(len(per_user))
-    for i, (_, row) in enumerate(per_user.iterrows()):
-        pct = row["TWD"] / grand_combined * 100 if grand_combined > 0 else 0
+    # ===== 8. 共同資產走勢(粗合計 + 細各人) =====
+    st.markdown("### 📈 共同資產走勢")
+    per_user_line = (
+        df_ranged.groupby(["年月", "使用者"])["TWD"].sum().reset_index()
+    )
+
+    fig_trend = go.Figure()
+    # 各人線(虛線、半透明)
+    for user in per_user_line["使用者"].unique():
+        sub = per_user_line[per_user_line["使用者"] == user]
+        fig_trend.add_trace(
+            go.Scatter(
+                x=sub["年月"],
+                y=sub["TWD"],
+                mode="lines+markers",
+                name=user,
+                line=dict(width=2, dash="dot"),
+                opacity=0.6,
+            )
+        )
+    # 共同合計(粗線)
+    fig_trend.add_trace(
+        go.Scatter(
+            x=monthly_total.index,
+            y=monthly_total.values,
+            mode="lines+markers",
+            name="共同合計",
+            line=dict(width=4, color="#3b82f6"),
+        )
+    )
+    fig_trend.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
+    fig_trend.update_layout(height=400, hovermode="x unified")
+    st.plotly_chart(fig_trend, use_container_width=True)
+
+    # ===== 9. 每月變化 bar =====
+    st.markdown("### 📊 每月變化")
+    diff = monthly_total.diff().dropna()
+    if len(diff) > 0:
+        diff_df = diff.reset_index()
+        diff_df.columns = ["年月", "變化"]
+        fig_diff = go.Figure()
+        fig_diff.add_trace(
+            go.Bar(
+                x=diff_df["年月"],
+                y=diff_df["變化"],
+                marker_color=[
+                    "#10b981" if v >= 0 else "#ef4444" for v in diff_df["變化"]
+                ],
+                text=diff_df["變化"].apply(lambda v: f"{v:+,.0f}"),
+                textposition="outside",
+            )
+        )
+        fig_diff.update_layout(
+            height=320, hovermode="x unified",
+            yaxis_title="台幣變化", showlegend=False,
+        )
+        st.plotly_chart(fig_diff, use_container_width=True)
+    else:
+        st.caption("(只有一個月的資料,還沒辦法算月差)")
+
+    # ===== 10. 各人占比走勢(堆疊面積) =====
+    if df_ranged["使用者"].nunique() > 1:
+        st.markdown("### 👥 各人占比走勢")
+        # 注意:堆疊面積對負數會詭異,僅用正資產部分繪製
+        positive_df = df_ranged[df_ranged["TWD"] > 0].copy()
+        if not positive_df.empty:
+            user_stack = (
+                positive_df.groupby(["年月", "使用者"])["TWD"]
+                .sum()
+                .reset_index()
+            )
+            fig_stack = px.area(
+                user_stack,
+                x="年月",
+                y="TWD",
+                color="使用者",
+            )
+            fig_stack.update_layout(
+                height=350, hovermode="x unified", legend_title_text=""
+            )
+            st.plotly_chart(fig_stack, use_container_width=True)
+            st.caption("ℹ️ 此圖只計入正資產,負債(負數)不參與堆疊。")
+
+    st.divider()
+
+    # ===== 11. 月份明細 =====
+    st.markdown("### 📋 月份明細")
+    available_ym = sorted(df["年月"].unique(), reverse=True)
+    selected_ym = st.selectbox(
+        "選擇月份",
+        available_ym,
+        index=0,
+        key="combined_detail_ym",
+    )
+
+    detail_df = df[df["年月"] == selected_ym].copy()
+    if detail_df.empty:
+        st.info("這個月沒有資料")
+        return
+
+    # 摘要
+    total = detail_df["TWD"].sum()
+    pos_sum = detail_df.loc[detail_df["TWD"] >= 0, "TWD"].sum()
+    neg_sum = detail_df.loc[detail_df["TWD"] < 0, "TWD"].sum()
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric(f"{selected_ym} 共同總計", f"NT$ {total:,.0f}")
+    s2.metric("正資產", f"NT$ {pos_sum:,.0f}")
+    s3.metric("負債", f"NT$ {neg_sum:,.0f}", delta_color="off")
+
+    # 各人小計(本月)
+    st.markdown("#### 👥 各人小計")
+    per_user_detail = (
+        detail_df.groupby("使用者")["TWD"].sum().reset_index().sort_values(
+            "TWD", ascending=False
+        )
+    )
+    user_cols = st.columns(max(len(per_user_detail), 1))
+    for i, (_, row) in enumerate(per_user_detail.iterrows()):
+        pct = row["TWD"] / total * 100 if total != 0 else 0
         user_cols[i].metric(
             row["使用者"],
             f"NT$ {row['TWD']:,.0f}",
-            delta=f"{pct:.0f}%",
+            delta=f"{pct:.0f}%" if total != 0 else None,
             delta_color="off",
         )
 
-    # 兩個圖排在一起
-    chart_col1, chart_col2 = st.columns(2)
+    # 兩個圓餅
+    st.markdown("#### 🥧 占比圖")
+    pie_col1, pie_col2 = st.columns(2)
 
-    with chart_col1:
-        st.markdown("### 📊 依分區")
-        per_section = df.groupby("分區名")["TWD"].sum().reset_index()
-        fig_sec = px.pie(
-            per_section,
-            values="TWD",
-            names="分區名",
-            hole=0.4,
-            color="分區名",
-            color_discrete_map={
-                "帳戶資產": "#3b82f6",
-                "投資帳戶": "#10b981",
-                "其他項目": "#f59e0b",
-            },
-        )
-        fig_sec.update_traces(textposition="inside", textinfo="percent+label")
-        fig_sec.update_layout(height=350, showlegend=False)
-        st.plotly_chart(fig_sec, use_container_width=True)
+    with pie_col1:
+        st.caption("依分區")
+        per_section = detail_df.loc[detail_df["TWD"] > 0].groupby("分區名")["TWD"].sum().reset_index()
+        if not per_section.empty:
+            fig_sec = px.pie(
+                per_section,
+                values="TWD",
+                names="分區名",
+                hole=0.4,
+                color="分區名",
+                color_discrete_map={
+                    "帳戶資產": "#3b82f6",
+                    "投資帳戶": "#10b981",
+                    "其他項目": "#f59e0b",
+                },
+            )
+            fig_sec.update_traces(textposition="inside", textinfo="percent+label")
+            fig_sec.update_layout(height=320, showlegend=False)
+            st.plotly_chart(fig_sec, use_container_width=True)
+        else:
+            st.caption("(本月沒有正資產)")
 
-    with chart_col2:
-        st.markdown("### 👥 各人占比")
-        fig_user = px.pie(per_user, values="TWD", names="使用者", hole=0.4)
-        fig_user.update_traces(textposition="inside", textinfo="percent+label")
-        fig_user.update_layout(height=350, showlegend=False)
-        st.plotly_chart(fig_user, use_container_width=True)
+    with pie_col2:
+        st.caption("依使用者")
+        per_user_pie = detail_df.loc[detail_df["TWD"] > 0].groupby("使用者")["TWD"].sum().reset_index()
+        if not per_user_pie.empty and len(per_user_pie) > 1:
+            fig_user = px.pie(per_user_pie, values="TWD", names="使用者", hole=0.4)
+            fig_user.update_traces(textposition="inside", textinfo="percent+label")
+            fig_user.update_layout(height=320, showlegend=False)
+            st.plotly_chart(fig_user, use_container_width=True)
+        else:
+            st.caption("(只有一個人,不顯示)")
 
-    # 細項
-    st.markdown("### 📋 細項")
-    detail = (
-        df[["使用者", "分區名", "類別", "currency", "current_value", "exchange_rate", "TWD"]]
+    # 細項表格
+    st.markdown("#### 📋 細項")
+    show_df = (
+        detail_df[["使用者", "分區名", "類別", "currency", "current_value",
+                   "exchange_rate", "TWD"]]
         .copy()
-        .rename(
-            columns={
-                "分區名": "分區",
-                "currency": "幣別",
-                "current_value": "原幣金額",
-                "exchange_rate": "匯率",
-                "TWD": "台幣金額",
-            }
-        )
+        .rename(columns={
+            "分區名": "分區",
+            "currency": "幣別",
+            "current_value": "原幣金額",
+            "exchange_rate": "匯率",
+            "TWD": "台幣金額",
+        })
         .sort_values(["使用者", "分區", "類別"])
     )
     st.dataframe(
-        detail,
+        show_df,
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -944,71 +1111,6 @@ def _render_tab_combined():
             "台幣金額": st.column_config.NumberColumn(format="%d"),
         },
     )
-
-    # ---------- 7. 共同走勢圖(歷月) ----------
-    st.divider()
-    st.markdown("### 📈 共同資產走勢")
-
-    try:
-        all_ma_q = (
-            get_supabase()
-            .table("monthly_assets")
-            .select("year, month, user_id, currency, exchange_rate, current_value")
-            .in_("user_id", selected_user_ids)
-            .in_("category_id", selected_cat_ids)
-            .order("year")
-            .order("month")
-            .execute()
-        )
-        history = all_ma_q.data or []
-    except Exception as e:
-        st.error(f"讀取走勢失敗:{e}")
-        history = []
-
-    if history:
-        hdf = pd.DataFrame(history)
-        hdf["TWD"] = hdf.apply(
-            lambda r: to_twd(r["current_value"], r["currency"], r["exchange_rate"]),
-            axis=1,
-        )
-        hdf["年月"] = hdf.apply(
-            lambda r: f"{r['year']:04d}-{r['month']:02d}", axis=1
-        )
-        hdf["使用者"] = hdf["user_id"].map(lambda x: name_map_c.get(x, x[:8]))
-
-        # 整體合計線
-        total_line = hdf.groupby("年月")["TWD"].sum().reset_index()
-        # 各人線
-        per_user_line = (
-            hdf.groupby(["年月", "使用者"])["TWD"].sum().reset_index()
-        )
-
-        fig_trend = go.Figure()
-        # 各人(較淡)
-        for user in per_user_line["使用者"].unique():
-            sub = per_user_line[per_user_line["使用者"] == user]
-            fig_trend.add_trace(
-                go.Scatter(
-                    x=sub["年月"],
-                    y=sub["TWD"],
-                    mode="lines+markers",
-                    name=user,
-                    line=dict(width=2, dash="dot"),
-                    opacity=0.6,
-                )
-            )
-        # 合計(粗線)
-        fig_trend.add_trace(
-            go.Scatter(
-                x=total_line["年月"],
-                y=total_line["TWD"],
-                mode="lines+markers",
-                name="共同合計",
-                line=dict(width=4, color="#3b82f6"),
-            )
-        )
-        fig_trend.update_layout(height=400, hovermode="x unified")
-        st.plotly_chart(fig_trend, use_container_width=True)
 
 
 # 在 tab 中執行該函式
