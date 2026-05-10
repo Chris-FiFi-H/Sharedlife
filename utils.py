@@ -121,6 +121,9 @@ def get_supabase() -> Client:
     """
     取得這個 session 專屬的 Supabase client。
     每個瀏覽器 session 一個 client,登入狀態彼此獨立。
+
+    重點:確保在回傳前 client 的 auth 已經設好,避免「first query 沒帶 JWT
+    導致 RLS 過濾掉所有資料」造成的「管理類別空白」現象。
     """
     if "supabase_client" not in st.session_state:
         try:
@@ -137,17 +140,29 @@ def get_supabase() -> Client:
 
     client = st.session_state.supabase_client
 
-    # 如果 session_state 裡有 token 但 client 還沒套用,把它套上去
+    # 確保 auth 已套到 client 上(每次都檢查,而不是只在 token 變動時)
     auth = st.session_state.get("auth_session")
     if auth:
         try:
             current = client.auth.get_session()
-            if current is None or current.access_token != auth["access_token"]:
+            need_set = (
+                current is None
+                or current.access_token != auth["access_token"]
+            )
+            if need_set:
                 client.auth.set_session(auth["access_token"], auth["refresh_token"])
+                # 標記 client 已套 auth 過,讓後續呼叫者可以信任
+                st.session_state._auth_applied = True
         except Exception:
-            pass
+            # 如果 set 失敗,也不要 silent 跳過,標記一下
+            st.session_state._auth_applied = False
 
     return client
+
+
+def is_auth_ready() -> bool:
+    """檢查 supabase client 是否已套上 auth(用於除錯/防禦)。"""
+    return bool(st.session_state.get("_auth_applied"))
 
 
 def get_current_user():
