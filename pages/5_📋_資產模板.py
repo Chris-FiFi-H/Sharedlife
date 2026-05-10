@@ -25,37 +25,19 @@ require_login()
 render_sidebar()
 me = get_current_user()
 
-# 讓所有 selectbox 變成「純下拉」,使用者無法打字搜尋
-# 透過 CSS:
-#  - caret-color 透明 → 看不到游標
-#  - input 設成 readonly(用 attribute selector 觸發):無法輸入
-#  - cursor 改 pointer → 視覺上像按鈕而不是輸入框
+# 讓所有 selectbox 視覺上像「純下拉」(無法 100% 擋鍵盤,但隱藏游標讓使用者
+# 不會嘗試輸入)
+# 注意:不能在這裡注入 <script>,會把 Streamlit metric 等組件的 module 載入弄壞
 st.markdown("""
 <style>
 [data-baseweb="select"] input {
     caret-color: transparent !important;
     cursor: pointer !important;
 }
-/* 讓輸入框失去焦點時不會留下殘影 */
 [data-baseweb="select"] input:focus {
     outline: none !important;
 }
 </style>
-<script>
-// 把所有 selectbox 的 input 設成 readonly,徹底防止打字
-(function() {
-    const setReadonly = () => {
-        document.querySelectorAll('[data-baseweb="select"] input').forEach(el => {
-            el.setAttribute('readonly', 'readonly');
-        });
-    };
-    setReadonly();
-    // 監聽 DOM 變化(Streamlit 重新 render 時 selectbox 會被重建)
-    new MutationObserver(setReadonly).observe(
-        document.body, { childList: true, subtree: true }
-    );
-})();
-</script>
 """, unsafe_allow_html=True)
 
 st.title("📋 資產模板")
