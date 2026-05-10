@@ -218,13 +218,30 @@ def get_current_user():
     return st.session_state.get("user")
 
 
+def ensure_url_has_token():
+    """
+    確保 URL 帶著 refresh token。Streamlit 多頁面切換時 query param 會被丟掉,
+    導致該頁重整時拿不到 token → 失敗。每次頁面載入(已登入時)都重新蓋一下。
+    """
+    if not get_current_user():
+        return
+    auth = st.session_state.get("auth_session")
+    if not auth or not auth.get("refresh_token"):
+        return
+    # 只在 URL 沒有 token 時才寫(避免不必要的 URL 變動)
+    if not get_session_from_url():
+        save_session_to_url(auth["refresh_token"])
+
+
 def require_login():
     """放在每個受保護頁面的最上面。沒登入時先試 cookie,失敗才提示登入。"""
     if get_current_user():
+        # 已登入 → 確保 URL 上有 token,讓這頁重整時也能自動登入
+        ensure_url_has_token()
         return
 
-    # 沒登入,先試 cookie 自動登入
-    get_cookie_manager()  # 確保 cookie manager 啟動
+    # 沒登入,先試 URL / cookie 自動登入
+    get_cookie_manager()  # 確保 cookie manager 啟動(備援用)
     auth_result = try_auto_login()
 
     if auth_result == "success":
