@@ -14,13 +14,20 @@ COOKIE_DAYS = 30
 
 def get_cookie_manager():
     """
-    取得 CookieManager。每個 browser session 建一個,存在 session_state。
-    不能用 @st.cache_resource,因為 CookieManager 內部會 render 一個 component widget,
-    Streamlit 不允許 widget 出現在 cached function 裡。
+    取得 CookieManager。整個 App 一個就好,但每次 rerun 都重新 fetch cookie。
+    用 session_state 而不是 @st.cache_resource(會踩 cached widget 限制)。
     """
     if "_cookie_manager_instance" not in st.session_state:
         st.session_state._cookie_manager_instance = stx.CookieManager(key="sl_cookie_mgr")
     return st.session_state._cookie_manager_instance
+
+
+def _read_cookie_value(name: str):
+    """直接拿單一 cookie 的值,如果還沒 ready 回傳 None。"""
+    try:
+        return get_cookie_manager().get(name)
+    except Exception:
+        return None
 
 
 def save_session_cookie(refresh_token: str):
@@ -49,22 +56,40 @@ def clear_session_cookie():
         pass
 
 
-def try_auto_login() -> bool:
+def try_auto_login() -> str:
     """
     用 cookie 中的 refresh_token 嘗試自動登入。
-    回傳 True 表示成功還原 session,呼叫端應 st.rerun()。
+
+    回傳值:
+      "logged_in" - 已經登入,不用處理
+      "success"   - 自動登入成功(呼叫端應 st.rerun())
+      "no_cookie" - 沒有保存的 session 或無效,顯示登入頁
+      "waiting"   - cookie 還沒從瀏覽器讀回來,呼叫端應顯示「載入中」或等下一個 rerun
     """
     if get_current_user():
-        return False  # 已登入,不用做事
+        return "logged_in"
 
-    cookies = get_cookie_manager().get_all()
-    if not cookies:
-        return False  # 第一次 render 還沒拿到 cookie 內容
+    # 第一次進頁面時 CookieManager 才剛被初始化,瀏覽器 cookie 可能還沒回來。
+    # 這時 cookies dict 會是空的 — 但使用者「看起來」就是沒 cookie,跟「真的沒登入過」一樣。
+    # 解法:如果是這個 session 第一次嘗試 + cookies 空,先標記、rerun 一次給 cookie 時間到貨。
+    cm = get_cookie_manager()
+    try:
+        cookies = cm.get_all() or {}
+    except Exception:
+        cookies = {}
 
     refresh_token = cookies.get(COOKIE_NAME)
-    if not refresh_token:
-        return False  # 沒有保存的 session
 
+    # 還沒拿到任何 cookie:可能是 (a) 還沒從瀏覽器收到,(b) 真的沒登入過
+    # 如果這個 session 還沒重試過,給它一次重試的機會
+    if not cookies and not st.session_state.get("_cookie_retry_done"):
+        st.session_state._cookie_retry_done = True
+        return "waiting"
+
+    if not refresh_token:
+        return "no_cookie"
+
+    # 真的有 token 了,試著用它登入
     try:
         client = get_supabase()
         response = client.auth.refresh_session(refresh_token)
@@ -84,12 +109,12 @@ def try_auto_login() -> bool:
             }
             # 更新 cookie(refresh_token 可能被輪替了)
             save_session_cookie(response.session.refresh_token)
-            return True
+            return "success"
     except Exception:
         # token 過期或無效,清掉 cookie
         clear_session_cookie()
 
-    return False
+    return "no_cookie"
 
 
 def get_supabase() -> Client:
@@ -131,8 +156,23 @@ def get_current_user():
 
 
 def require_login():
-    """放在每個受保護頁面的最上面。沒登入就停在這裡。"""
-    if not get_current_user():
+    """放在每個受保護頁面的最上面。沒登入時先試 cookie,失敗才提示登入。"""
+    if get_current_user():
+        return
+
+    # 沒登入,先試 cookie 自動登入
+    get_cookie_manager()  # 確保 cookie manager 啟動
+    auth_result = try_auto_login()
+
+    if auth_result == "success":
+        st.rerun()
+    elif auth_result == "waiting":
+        st.info("⏳ 載入中...")
+        import time
+        time.sleep(0.3)
+        st.rerun()
+    else:
+        # no_cookie:真的沒登入,提示去首頁
         st.warning("⚠️ 請先到首頁登入")
         st.page_link("app.py", label="← 回到登入頁", icon="🔑")
         st.stop()
